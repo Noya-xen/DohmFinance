@@ -2,14 +2,14 @@
 
 link projek : https://testnet.dohm.finance/app/link
 
-Script TypeScript untuk aktivitas wallet aktif di Dohm Testnet/Bitcoin Regtest: membuat wallet terenkripsi, meminta BTC/frBTC faucet, bonding, claim bond matang, swap, stake/unstake, serta add/remove liquidity.
+Script TypeScript untuk aktivitas wallet aktif di Dohm Testnet/Bitcoin Regtest: membuat wallet testnet dengan recovery phrase plaintext, meminta BTC/frBTC faucet, bonding, claim bond matang, swap, stake/unstake, serta add/remove liquidity.
 
 ## Setup
 
 ```powershell
 npm install
 Copy-Item .env.example .env
-# isi DOHM_WALLET_PASSWORD dengan password kuat
+# DOHM_WALLET_PASSWORD hanya diperlukan untuk wallet lama yang masih terenkripsi
 ```
 
 Jalankan menu interaktif:
@@ -35,9 +35,9 @@ Menu menyediakan satu-run workflow seperti:
 [0] Exit
 ```
 
-Pilih `[1] Create Wallet and Save Wallet`, lalu masukkan jumlah wallet yang ingin dibuat. Semua wallet disimpan dalam satu file `wallet.json` sebagai keystore terenkripsi. Jika file sudah berisi wallet, wallet baru akan ditambahkan dan tidak menimpa wallet lama.
+Pilih `[1] Create Wallet and Save Wallet`, lalu masukkan jumlah wallet yang ingin dibuat. Semua wallet disimpan dalam satu file `wallet.json` dengan field `mnemonic` plaintext agar mudah diimpor ke website testnet. Jika file sudah berisi wallet, wallet baru akan ditambahkan dan tidak menimpa wallet lama.
 
-Pembuatan batch juga tersedia melalui CLI:
+Pembuatan batch juga tersedia melalui CLI dan tidak memerlukan `DOHM_WALLET_PASSWORD` untuk wallet baru:
 
 ```powershell
 npm start -- wallet create --count=3
@@ -52,7 +52,7 @@ npm start -- wallet backup
 # atau: npm start -- wallet backup --wallet-index=2
 ```
 
-Jika memiliki `wallet.json` lama dengan format satu wallet, script tetap bisa membacanya. Jalankan `npm start -- wallet migrate` untuk menormalisasikannya ke format satu file yang mendukung banyak wallet.
+Jika memiliki `wallet.json` lama dengan format satu wallet terenkripsi, script tetap bisa membacanya. Jalankan `npm start -- wallet migrate` untuk mengubahnya menjadi format plaintext; password lama hanya diperlukan satu kali saat migrasi.
 
 Jika `wallet.json` kosong, pilih menu `[1]` dan file akan diinisialisasi ulang dengan aman. Jika file berisi JSON rusak, jangan hapus sebelum memastikan ada backup karena file tersebut mungkin berisi wallet yang perlu dipulihkan.
 
@@ -62,7 +62,7 @@ Untuk mengimpor wallet script ke website Dohm, tampilkan recovery phrase secara 
 npm start -- wallet backup
 ```
 
-Atau pilih `[B] Backup Wallet Recovery Phrase` di menu. Salin 12 kata tersebut ke kolom `Recovery phrase` pada form `Restore wallet`. Password website boleh berbeda dari `DOHM_WALLET_PASSWORD` karena keduanya hanya mengenkripsi wallet di tempat masing-masing.
+Atau pilih `[B] Backup Wallet Recovery Phrase` di menu. Salin 12 kata dari field `mnemonic` atau output backup ke kolom `Recovery phrase` pada form `Restore wallet`.
 
 Untuk setup aset secara langsung:
 
@@ -82,7 +82,7 @@ npm start -- claim-matured
 
 Jumlah default workflow diatur melalui `.env`. Pilihan `Full Auto` menjalankan faucet, bonding, swap, stake/unstake, add/remove liquidity, dan claim matured secara sequential.
 
-`wallet.json` berisi keystore terenkripsi dan sengaja masuk `.gitignore`. Recovery phrase hanya ditampilkan melalui perintah backup yang eksplisit; simpan di password manager/catatan terenkripsi dan jangan gunakan private key mainnet.
+`wallet.json` berisi recovery phrase plaintext untuk kemudahan testnet dan sengaja masuk `.gitignore`. Jangan upload, commit, atau bagikan file ini. Jangan gunakan format plaintext ini untuk wallet mainnet.
 
 ## Catatan
 

@@ -7,10 +7,7 @@ import * as bitcoin from "bitcoinjs-lib";
 import { BIP32Factory } from "bip32";
 import * as bip39 from "bip39";
 import * as ecc from "tiny-secp256k1";
-import {
-  createKeystore,
-  KeystoreSigner,
-} from "@alkanes/ts-sdk";
+import { KeystoreSigner } from "@alkanes/ts-sdk";
 
 type Id = { block: bigint; tx: bigint };
 type AlkaneMap = Record<string, bigint>;
@@ -22,7 +19,8 @@ type Utxo = {
   blockHash?: string;
 };
 type WalletInfo = {
-  keystore: string;
+  mnemonic?: string;
+  keystore?: string;
   network: "regtest";
   address: string;
   publicKey: string;
@@ -60,7 +58,7 @@ function key(v: Id): string {
 }
 
 function deriveAccount(mnemonic: string): { address: string; publicKey: string; addressType: "p2wpkh" } {
-  if (!bip39.validateMnemonic(mnemonic)) throw new Error("Encrypted keystore contains an invalid mnemonic.");
+  if (!bip39.validateMnemonic(mnemonic)) throw new Error("Wallet contains an invalid recovery phrase.");
   const root = bip32.fromSeed(bip39.mnemonicToSeedSync(mnemonic), NETWORK);
   const node = root.derivePath("m/84'/1'/0'/0/0");
   const pubkey = Buffer.from(node.publicKey);
@@ -109,13 +107,12 @@ async function loadWallet(): Promise<{ signer: KeystoreSigner; info: WalletInfo 
   if (info.network !== "regtest" || info.addressType !== "p2wpkh") {
     throw new Error("wallet.json is not a Dohm regtest P2WPKH wallet.");
   }
-  const signer = await KeystoreSigner.fromEncrypted(info.keystore, requirePassword(), {
-    network: "regtest",
-    addressType: "p2wpkh",
-  });
+  const signer = info.mnemonic
+    ? KeystoreSigner.fromMnemonic(info.mnemonic, { network: "regtest", addressType: "p2wpkh" })
+    : await KeystoreSigner.fromEncrypted(info.keystore!, requirePassword(), { network: "regtest", addressType: "p2wpkh" });
   const account = deriveAccount(signer.exportMnemonic());
   if (account.address !== info.address) {
-    throw new Error("Wallet address does not match the encrypted keystore.");
+    throw new Error("Wallet address does not match the recovery phrase.");
   }
   return { signer, info };
 }
@@ -137,7 +134,7 @@ function isWalletInfo(value: unknown): value is WalletInfo {
   const item = value as Partial<WalletInfo>;
   return item.network === "regtest"
     && item.addressType === "p2wpkh"
-    && typeof item.keystore === "string"
+    && (typeof item.mnemonic === "string" || typeof item.keystore === "string")
     && typeof item.address === "string"
     && typeof item.publicKey === "string"
     && typeof item.createdAt === "string";
@@ -186,14 +183,14 @@ function selectedWalletIndex(): number {
 async function createWallet(count = 1): Promise<void> {
   const existingWallets = await readWalletCollectionOrEmpty();
   const wallets = [...existingWallets];
-  const password = requirePassword();
   let saved = 0;
   for (let index = 0; index < count; index += 1) {
     try {
-      const { keystore, mnemonic } = await createKeystore(password, { network: "regtest", wordCount: 12 });
+      const signer = KeystoreSigner.generate({ network: "regtest", addressType: "p2wpkh" }, 12);
+      const mnemonic = signer.exportMnemonic();
       const account = deriveAccount(mnemonic);
       const info: WalletInfo = {
-        keystore: typeof keystore === "string" ? keystore : JSON.stringify(keystore),
+        mnemonic,
         network: "regtest",
         address: account.address,
         publicKey: account.publicKey,
@@ -211,7 +208,7 @@ async function createWallet(count = 1): Promise<void> {
   if (saved > 0) await writeWalletCollection(wallets);
   console.log(`[i] Selesai membuat wallet: ${saved}/${count}`);
   console.log(`[i] Total wallet tersimpan dalam ${WALLET_FILE}: ${wallets.length}`);
-  console.log("[!] Recovery phrase tidak ditampilkan. Gunakan wallet index saat backup jika diperlukan.");
+  console.log(`[!] Recovery phrase tersimpan plaintext di ${WALLET_FILE} untuk kebutuhan import testnet. Jangan upload file ini.`);
 }
 
 async function listWallets(): Promise<void> {
@@ -227,9 +224,20 @@ async function listWallets(): Promise<void> {
 
 async function migrateWalletStore(): Promise<void> {
   const wallets = await readWalletCollection();
-  await writeWalletCollection(wallets);
-  console.log(`[✓] Wallet store dinormalisasi ke format satu file: ${WALLET_FILE}`);
-  console.log(`[i] Total wallet: ${wallets.length}`);
+  const encryptedWallets = wallets.filter((wallet) => !wallet.mnemonic);
+  const password = encryptedWallets.length > 0 ? requirePassword() : undefined;
+  const normalized: WalletInfo[] = [];
+  for (const wallet of wallets) {
+    if (wallet.mnemonic) {
+      normalized.push(wallet);
+      continue;
+    }
+    const signer = await KeystoreSigner.fromEncrypted(wallet.keystore!, password!, { network: "regtest", addressType: "p2wpkh" });
+    normalized.push({ ...wallet, mnemonic: signer.exportMnemonic(), keystore: undefined });
+  }
+  await writeWalletCollection(normalized);
+  console.log(`[✓] Wallet store dinormalisasi ke format plaintext: ${WALLET_FILE}`);
+  console.log(`[i] Total wallet: ${normalized.length} | Dikonversi: ${encryptedWallets.length}`);
 }
 
 async function backupWallet(): Promise<void> {
