@@ -39,6 +39,7 @@ const BACKEND = process.env.DOHM_BACKEND_URL ?? "https://dohmapi-next.localtests
 const RPC_URL = process.env.DOHM_RPC_URL ?? "https://dohmapi-next.localtests.xyz/rpc";
 const ESPLORA_URL = process.env.DOHM_ESPLORA_URL ?? "https://dohmapi-next.localtests.xyz/esplora";
 const WALLET_FILE = process.env.DOHM_WALLET_FILE ?? "wallet.json";
+const MAX_WALLET_BATCH = 100;
 const FEE_RATE = Number(process.env.DOHM_FEE_RATE ?? "2");
 const DUST = 546;
 const NETWORK = bitcoin.networks.regtest;
@@ -110,29 +111,57 @@ async function loadWallet(): Promise<{ signer: KeystoreSigner; info: WalletInfo 
   return { signer, info };
 }
 
-async function createWallet(): Promise<void> {
-  if (await fs.stat(WALLET_FILE).then(() => true).catch(() => false)) {
-    throw new Error(`${WALLET_FILE} already exists; refusing to overwrite it.`);
+function parseWalletCount(raw: string | undefined): number {
+  const count = Number(raw ?? "1");
+  if (!Number.isInteger(count) || count < 1 || count > MAX_WALLET_BATCH) {
+    throw new Error(`Jumlah wallet harus bilangan bulat 1-${MAX_WALLET_BATCH}.`);
   }
+  return count;
+}
+
+function walletFileForBatch(index: number, count: number): string {
+  if (count === 1) return WALLET_FILE;
+  return path.join(path.dirname(WALLET_FILE), "wallets", `wallet-${String(index).padStart(3, "0")}.json`);
+}
+
+async function fileExists(file: string): Promise<boolean> {
+  return fs.stat(file).then(() => true).catch(() => false);
+}
+
+async function createWallet(count = 1): Promise<void> {
+  const targetFiles = Array.from({ length: count }, (_, index) => walletFileForBatch(index + 1, count));
+  const existingFiles: string[] = [];
+  for (const file of targetFiles) {
+    if (await fileExists(file)) existingFiles.push(file);
+  }
+  if (existingFiles.length > 0) {
+    throw new Error(`Wallet sudah ada, tidak menimpa: ${existingFiles.join(", ")}`);
+  }
+
   const password = requirePassword();
-  const { keystore, mnemonic } = await createKeystore(password, { network: "regtest", wordCount: 12 });
-  const signer = await KeystoreSigner.fromEncrypted(keystore, password, {
-    network: "regtest",
-    addressType: "p2wpkh",
-  });
-  const account = deriveAccount(mnemonic);
-  const info: WalletInfo = {
-    keystore: typeof keystore === "string" ? keystore : JSON.stringify(keystore),
-    network: "regtest",
-    address: account.address,
-    publicKey: account.publicKey,
-    addressType: "p2wpkh",
-    createdAt: new Date().toISOString(),
-  };
-  await writePrivateJson(WALLET_FILE, info);
-  console.log(`\x1b[32m[✓] Wallet saved: ${WALLET_FILE}\x1b[0m`);
-  console.log(`[i] Address: ${account.address}`);
-  console.log("[!] Mnemonic tidak disimpan oleh script. Backup wallet.json secara aman.");
+  let saved = 0;
+  for (const [index, file] of targetFiles.entries()) {
+    try {
+      const { keystore, mnemonic } = await createKeystore(password, { network: "regtest", wordCount: 12 });
+      const account = deriveAccount(mnemonic);
+      const info: WalletInfo = {
+        keystore: typeof keystore === "string" ? keystore : JSON.stringify(keystore),
+        network: "regtest",
+        address: account.address,
+        publicKey: account.publicKey,
+        addressType: "p2wpkh",
+        createdAt: new Date().toISOString(),
+      };
+      await writePrivateJson(file, info);
+      saved += 1;
+      console.log(`\x1b[32m[✓] Wallet ${index + 1}/${count} saved: ${file}\x1b[0m`);
+      console.log(`[i] Address: ${account.address}`);
+    } catch (error) {
+      console.log(`\x1b[31m[✗] Wallet ${index + 1}/${count} gagal: ${error instanceof Error ? error.message : String(error)}\x1b[0m`);
+    }
+  }
+  console.log(`[i] Selesai membuat wallet: ${saved}/${count}`);
+  console.log("[!] Recovery phrase tidak ditampilkan. Set DOHM_WALLET_FILE ke salah satu file lalu jalankan 'npm start -- wallet backup' jika diperlukan.");
 }
 
 async function backupWallet(): Promise<void> {
@@ -617,7 +646,10 @@ async function interactiveMenu(): Promise<void> {
       const choice = await askLine(rl, "Select option");
       if (choice === "0") return;
       if (choice === "1") {
-        try { await createWallet(); } catch (error) { console.log(`\x1b[31m[✗] ${error instanceof Error ? error.message : String(error)}\x1b[0m`); }
+        try {
+          const count = parseWalletCount(await askLine(rl, `Jumlah wallet (1-${MAX_WALLET_BATCH})`, "1"));
+          await createWallet(count);
+        } catch (error) { console.log(`\x1b[31m[✗] ${error instanceof Error ? error.message : String(error)}\x1b[0m`); }
         continue;
       }
       if (choice === "9") {
@@ -670,7 +702,7 @@ async function main(): Promise<void> {
   banner();
   const [command, subcommand] = process.argv.slice(2).filter((v) => !v.startsWith("--"));
   if (!command) return interactiveMenu();
-  if (command === "wallet" && subcommand === "create") return createWallet();
+  if (command === "wallet" && subcommand === "create") return createWallet(parseWalletCount(arg("count")));
   if (command === "wallet" && subcommand === "backup") return backupWallet();
   if (command === "faucet") {
     const { signer, info } = await loadWallet();

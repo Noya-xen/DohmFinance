@@ -34,6 +34,21 @@ Menu menyediakan satu-run workflow seperti:
 [0] Exit
 ```
 
+Pilih `[1] Create Wallet and Save Wallet`, lalu masukkan jumlah wallet yang ingin dibuat. Satu wallet disimpan sebagai `wallet.json`; jika jumlahnya lebih dari satu, file disimpan di folder `wallets/` dengan nama `wallet-001.json`, `wallet-002.json`, dan seterusnya. Script tidak menimpa file wallet yang sudah ada.
+
+Pembuatan batch juga tersedia melalui CLI:
+
+```powershell
+npm start -- wallet create --count=3
+```
+
+Untuk memakai salah satu wallet batch pada aksi lain, set file wallet yang aktif terlebih dahulu:
+
+```powershell
+$env:DOHM_WALLET_FILE = "wallets/wallet-001.json"
+npm start -- wallet backup
+```
+
 Untuk mengimpor wallet script ke website Dohm, tampilkan recovery phrase secara lokal:
 
 ```powershell
@@ -60,7 +75,7 @@ npm start -- claim-matured
 
 Jumlah default workflow diatur melalui `.env`. Pilihan `Full Auto` menjalankan faucet, bonding, swap, stake/unstake, add/remove liquidity, dan claim matured secara sequential.
 
-`wallet.json` berisi keystore terenkripsi dan sengaja masuk `.gitignore`. Recovery phrase hanya ditampilkan melalui perintah backup yang eksplisit; simpan di password manager/catatan terenkripsi dan jangan gunakan private key mainnet.
+`wallet.json` dan file di folder `wallets/` berisi keystore terenkripsi dan sengaja masuk `.gitignore`. Recovery phrase hanya ditampilkan melalui perintah backup yang eksplisit; simpan di password manager/catatan terenkripsi dan jangan gunakan private key mainnet.
 
 ## Catatan
 
