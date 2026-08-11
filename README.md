@@ -52,6 +52,17 @@ npm start -- wallet backup
 # atau: npm start -- wallet backup --wallet-index=2
 ```
 
+Menu dan perintah faucet juga hanya memakai satu wallet aktif dalam satu kali proses. Contoh untuk wallet #2:
+
+```powershell
+$env:DOHM_WALLET_INDEX = "2"
+npm start -- faucet btc
+# tunggu BTC terkonfirmasi, lalu jalankan:
+npm start -- faucet frbtc
+```
+
+Faucet BTC dan frBTC tidak boleh dijalankan bersamaan: script akan menunggu UTXO BTC yang sudah terkonfirmasi sebelum mencoba mint frBTC.
+
 Jika memiliki `wallet.json` lama dengan format satu wallet terenkripsi, script tetap bisa membacanya. Jalankan `npm start -- wallet migrate` untuk mengubahnya menjadi format plaintext; password lama hanya diperlukan satu kali saat migrasi.
 
 Wallet lama yang dibuat sebelum penyesuaian derivation path tetap dibaca dengan path legacy `m/84'/1'/0'/0/0`. Untuk mendapatkan alamat yang sama dengan website, buat wallet baru setelah update lalu impor mnemonic baru tersebut ke website.

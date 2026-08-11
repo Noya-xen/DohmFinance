@@ -823,7 +823,10 @@ async function interactiveMenu(): Promise<void> {
       switch (choice) {
         case "2":
           await runStep(results, "BTC faucet", async () => faucet(info.address, "btc"));
-          await runStep(results, "frBTC faucet and mint", async () => faucet(info.address, "frbtc", info, cfg, signer));
+          const btcReady = await runStep(results, "Wait for BTC fee UTXO", async () => waitForBtcUtxo(info.address));
+          if (btcReady) {
+            await runStep(results, "frBTC faucet and mint", async () => faucet(info.address, "frbtc", info, cfg, signer));
+          }
           break;
         case "3":
           await runStep(results, "Bonding", async () => {
@@ -862,9 +865,12 @@ async function main(): Promise<void> {
   if (command === "wallet" && subcommand === "migrate") return migrateWalletStore();
   if (command === "wallet" && subcommand === "backup") return backupWallet();
   if (command === "faucet") {
+    if (subcommand !== "btc" && subcommand !== "frbtc") {
+      throw new Error("Usage: npm start -- faucet btc | npm start -- faucet frbtc");
+    }
     const { signer, info } = await loadWallet();
     const cfg = subcommand === "frbtc" ? await getConfig() : undefined;
-    return faucet(info.address, subcommand as "btc" | "frbtc", info, cfg, signer);
+    return faucet(info.address, subcommand, info, cfg, signer);
   }
   if (command === "status") return status();
   const { signer, info } = await loadWallet();
