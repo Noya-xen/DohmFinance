@@ -35,7 +35,7 @@ Menu menyediakan satu-run workflow seperti:
 [0] Exit
 ```
 
-Pilih `[1] Create Wallet and Save Wallet`, lalu masukkan jumlah wallet yang ingin dibuat. Semua wallet disimpan dalam satu file `wallet.json` dengan field `mnemonic` plaintext agar mudah diimpor ke website testnet. Jika file sudah berisi wallet, wallet baru akan ditambahkan dan tidak menimpa wallet lama.
+Pilih `[1] Create Wallet and Save Wallet`, lalu masukkan jumlah wallet yang ingin dibuat. Semua wallet disimpan dalam satu file `wallet.json` dengan field `mnemonic` plaintext agar mudah diimpor ke website testnet. Script mengikuti derivation path Dohm `m/84'/0'/0'/0/0`, sehingga alamat `bcrt1q...` sama dengan website. Jika file sudah berisi wallet, wallet baru akan ditambahkan dan tidak menimpa wallet lama.
 
 Pembuatan batch juga tersedia melalui CLI dan tidak memerlukan `DOHM_WALLET_PASSWORD` untuk wallet baru:
 
@@ -53,6 +53,8 @@ npm start -- wallet backup
 ```
 
 Jika memiliki `wallet.json` lama dengan format satu wallet terenkripsi, script tetap bisa membacanya. Jalankan `npm start -- wallet migrate` untuk mengubahnya menjadi format plaintext; password lama hanya diperlukan satu kali saat migrasi.
+
+Wallet lama yang dibuat sebelum penyesuaian derivation path tetap dibaca dengan path legacy `m/84'/1'/0'/0/0`. Untuk mendapatkan alamat yang sama dengan website, buat wallet baru setelah update lalu impor mnemonic baru tersebut ke website.
 
 Jika `wallet.json` kosong, pilih menu `[1]` dan file akan diinisialisasi ulang dengan aman. Jika file berisi JSON rusak, jangan hapus sebelum memastikan ada backup karena file tersebut mungkin berisi wallet yang perlu dipulihkan.
 

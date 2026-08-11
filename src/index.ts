@@ -7,6 +7,7 @@ import * as bitcoin from "bitcoinjs-lib";
 import { BIP32Factory } from "bip32";
 import * as bip39 from "bip39";
 import * as ecc from "tiny-secp256k1";
+import { ECPairFactory } from "ecpair";
 import { KeystoreSigner } from "@alkanes/ts-sdk";
 
 type Id = { block: bigint; tx: bigint };
@@ -25,6 +26,7 @@ type WalletInfo = {
   address: string;
   publicKey: string;
   addressType: "p2wpkh";
+  derivationPath?: string;
   createdAt: string;
 };
 type WalletStore = {
@@ -45,7 +47,10 @@ const MAX_WALLET_BATCH = 100;
 const FEE_RATE = Number(process.env.DOHM_FEE_RATE ?? "2");
 const DUST = 546;
 const NETWORK = bitcoin.networks.regtest;
+const DOHM_DERIVATION_PATH = "m/84'/0'/0'/0/0";
+const LEGACY_DERIVATION_PATH = "m/84'/1'/0'/0/0";
 const bip32 = BIP32Factory(ecc);
+const ECPair = ECPairFactory(ecc);
 bitcoin.initEccLib(ecc);
 
 function id(s: string): Id {
@@ -57,14 +62,55 @@ function key(v: Id): string {
   return `${v.block}:${v.tx}`;
 }
 
-function deriveAccount(mnemonic: string): { address: string; publicKey: string; addressType: "p2wpkh" } {
+function deriveAccount(mnemonic: string, derivationPath = DOHM_DERIVATION_PATH): { address: string; publicKey: string; addressType: "p2wpkh" } {
   if (!bip39.validateMnemonic(mnemonic)) throw new Error("Wallet contains an invalid recovery phrase.");
   const root = bip32.fromSeed(bip39.mnemonicToSeedSync(mnemonic), NETWORK);
-  const node = root.derivePath("m/84'/1'/0'/0/0");
+  const node = root.derivePath(derivationPath);
   const pubkey = Buffer.from(node.publicKey);
   const address = bitcoin.payments.p2wpkh({ pubkey, network: NETWORK }).address;
   if (!address) throw new Error("Could not derive a regtest wallet address.");
   return { address, publicKey: pubkey.toString("hex"), addressType: "p2wpkh" };
+}
+
+type SignedPsbt = {
+  psbtHex: string;
+  psbtBase64: string;
+  txHex?: string;
+};
+
+class DohmSigner {
+  private readonly root: ReturnType<typeof bip32.fromSeed>;
+
+  constructor(private readonly mnemonic: string, private readonly derivationPath: string) {
+    if (!bip39.validateMnemonic(mnemonic)) throw new Error("Wallet contains an invalid recovery phrase.");
+    this.root = bip32.fromSeed(bip39.mnemonicToSeedSync(mnemonic), NETWORK);
+  }
+
+  exportMnemonic(): string {
+    return this.mnemonic;
+  }
+
+  async signPsbt(psbtBase64: string, options?: { finalize?: boolean; extractTx?: boolean }): Promise<SignedPsbt> {
+    const psbt = bitcoin.Psbt.fromBase64(psbtBase64, { network: NETWORK });
+    const node = this.root.derivePath(this.derivationPath);
+    const keyPair = ECPair.fromPrivateKey(Buffer.from(node.privateKey!), { network: NETWORK });
+    let signedInputs = 0;
+    for (let index = 0; index < psbt.inputCount; index += 1) {
+      try {
+        psbt.signInput(index, keyPair);
+        signedInputs += 1;
+      } catch {
+        // An input that does not belong to this wallet is left untouched.
+      }
+    }
+    if (signedInputs !== psbt.inputCount) {
+      throw new Error(`Signer could not sign all PSBT inputs (${signedInputs}/${psbt.inputCount}).`);
+    }
+    if (options?.finalize !== false) psbt.finalizeAllInputs();
+    const result: SignedPsbt = { psbtHex: psbt.toHex(), psbtBase64: psbt.toBase64() };
+    if (options?.extractTx && options?.finalize !== false) result.txHex = psbt.extractTransaction().toHex();
+    return result;
+  }
 }
 
 function printCredit(): void {
@@ -97,7 +143,7 @@ async function writePrivateJson(file: string, value: unknown): Promise<void> {
   await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
-async function loadWallet(): Promise<{ signer: KeystoreSigner; info: WalletInfo }> {
+async function loadWallet(): Promise<{ signer: DohmSigner; info: WalletInfo }> {
   const wallets = await readWalletCollection();
   const index = selectedWalletIndex();
   const info = wallets[index - 1];
@@ -107,10 +153,12 @@ async function loadWallet(): Promise<{ signer: KeystoreSigner; info: WalletInfo 
   if (info.network !== "regtest" || info.addressType !== "p2wpkh") {
     throw new Error("wallet.json is not a Dohm regtest P2WPKH wallet.");
   }
-  const signer = info.mnemonic
-    ? KeystoreSigner.fromMnemonic(info.mnemonic, { network: "regtest", addressType: "p2wpkh" })
-    : await KeystoreSigner.fromEncrypted(info.keystore!, requirePassword(), { network: "regtest", addressType: "p2wpkh" });
-  const account = deriveAccount(signer.exportMnemonic());
+  const derivationPath = info.derivationPath ?? LEGACY_DERIVATION_PATH;
+  const mnemonic = info.mnemonic
+    ? info.mnemonic
+    : (await KeystoreSigner.fromEncrypted(info.keystore!, requirePassword(), { network: "regtest", addressType: "p2wpkh" })).exportMnemonic();
+  const signer = new DohmSigner(mnemonic, derivationPath);
+  const account = deriveAccount(mnemonic, derivationPath);
   if (account.address !== info.address) {
     throw new Error("Wallet address does not match the recovery phrase.");
   }
@@ -188,13 +236,14 @@ async function createWallet(count = 1): Promise<void> {
     try {
       const signer = KeystoreSigner.generate({ network: "regtest", addressType: "p2wpkh" }, 12);
       const mnemonic = signer.exportMnemonic();
-      const account = deriveAccount(mnemonic);
+      const account = deriveAccount(mnemonic, DOHM_DERIVATION_PATH);
       const info: WalletInfo = {
         mnemonic,
         network: "regtest",
         address: account.address,
         publicKey: account.publicKey,
         addressType: "p2wpkh",
+        derivationPath: DOHM_DERIVATION_PATH,
         createdAt: new Date().toISOString(),
       };
       wallets.push(info);
@@ -476,7 +525,7 @@ async function prepareFrbtcMint(account: WalletInfo, cfg: Config, attestation: b
   return buildPsbt(account, [fee], script, 1, "frBTC-mint");
 }
 
-async function signAndBroadcast(prepared: PreparedTx, signer: KeystoreSigner): Promise<string> {
+async function signAndBroadcast(prepared: PreparedTx, signer: DohmSigner): Promise<string> {
   console.log(`[~] ${prepared.action} | signing and broadcasting...`);
   const signed = await signer.signPsbt(prepared.psbtBase64, { finalize: true, extractTx: true });
   if (!signed.txHex) throw new Error("Signer did not return an extracted transaction.");
@@ -485,7 +534,7 @@ async function signAndBroadcast(prepared: PreparedTx, signer: KeystoreSigner): P
   return txid;
 }
 
-async function faucet(address: string, kind: "btc" | "frbtc", info?: WalletInfo, cfg?: Config, signer?: KeystoreSigner): Promise<void> {
+async function faucet(address: string, kind: "btc" | "frbtc", info?: WalletInfo, cfg?: Config, signer?: DohmSigner): Promise<void> {
   const endpoint = kind === "btc" ? "/faucet-btc" : "/frbtc/attest";
   const response = await fetch(`${BACKEND.replace(/\/$/, "")}${endpoint}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(kind === "btc" ? { address } : {}) });
   const body = await response.json();
@@ -654,7 +703,7 @@ async function waitForBtcUtxo(address: string, timeoutMs = 120000): Promise<void
   throw new Error("BTC faucet belum menghasilkan UTXO fee yang terkonfirmasi.");
 }
 
-async function runStakeUnstake(info: WalletInfo, cfg: Config, signer: KeystoreSigner, results: StepResult[]): Promise<void> {
+async function runStakeUnstake(info: WalletInfo, cfg: Config, signer: DohmSigner, results: StepResult[]): Promise<void> {
   const amount = amountEnv("DOHM_DEFAULT_STAKE_AMOUNT", "1000000");
   const staked = await runStep(results, `Stake ${amount}`, async () => {
     const prepared = await prepareStake(info, cfg, amount, false);
@@ -671,7 +720,7 @@ async function runStakeUnstake(info: WalletInfo, cfg: Config, signer: KeystoreSi
   });
 }
 
-async function runLiquidityCycle(info: WalletInfo, cfg: Config, signer: KeystoreSigner, results: StepResult[]): Promise<void> {
+async function runLiquidityCycle(info: WalletInfo, cfg: Config, signer: DohmSigner, results: StepResult[]): Promise<void> {
   const dohm = amountEnv("DOHM_DEFAULT_DOHM_LIQUIDITY", "1000000");
   const frbtc = amountEnv("DOHM_DEFAULT_FRBTC_LIQUIDITY", "1000000");
   const added = await runStep(results, `Add liquidity DOHM=${dohm} frBTC=${frbtc}`, async () => {
@@ -694,7 +743,7 @@ async function runLiquidityCycle(info: WalletInfo, cfg: Config, signer: Keystore
   });
 }
 
-async function runFullAuto(info: WalletInfo, cfg: Config, signer: KeystoreSigner): Promise<void> {
+async function runFullAuto(info: WalletInfo, cfg: Config, signer: DohmSigner): Promise<void> {
   const results: StepResult[] = [];
   await runStep(results, "BTC faucet", async () => faucet(info.address, "btc"));
   await runStep(results, "Wait for BTC fee UTXO", async () => waitForBtcUtxo(info.address));
