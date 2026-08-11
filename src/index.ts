@@ -1,6 +1,8 @@
 import "dotenv/config";
 import fs from "node:fs/promises";
 import path from "node:path";
+import readline from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 import * as bitcoin from "bitcoinjs-lib";
 import {
   createKeystore,
@@ -56,7 +58,7 @@ function printCredit(): void {
 
 function banner(): void {
   console.log("\x1b[36mDOHM TESTNET ACTIVITY\x1b[0m");
-  console.log("Bitcoin Regtest + ALKANES | dry-run default\n");
+  console.log("Bitcoin Regtest + ALKANES | interactive activity runner\n");
   printCredit();
 }
 
@@ -343,20 +345,16 @@ async function prepareFrbtcMint(account: WalletInfo, cfg: Config, attestation: b
   return buildPsbt(account, [fee], script, 1, "frBTC-mint");
 }
 
-async function signAndMaybeBroadcast(prepared: PreparedTx, signer: KeystoreSigner, confirm: boolean): Promise<void> {
-  console.log(`[~] ${prepared.action} | PSBT ready (dry-run=${!confirm})`);
-  if (!confirm) { console.log(`[i] ${prepared.psbtBase64}`); return; }
+async function signAndBroadcast(prepared: PreparedTx, signer: KeystoreSigner): Promise<string> {
+  console.log(`[~] ${prepared.action} | signing and broadcasting...`);
   const signed = await signer.signPsbt(prepared.psbtBase64, { finalize: true, extractTx: true });
   if (!signed.txHex) throw new Error("Signer did not return an extracted transaction.");
   const txid = await rpc<string>("btc_sendrawtransaction", [signed.txHex]);
   console.log(`\x1b[32m[✓] Broadcast: ${txid}\x1b[0m`);
+  return txid;
 }
 
-async function faucet(address: string, kind: "btc" | "frbtc", info?: WalletInfo, cfg?: Config, signer?: KeystoreSigner, confirm = false): Promise<void> {
-  if (!confirm) {
-    console.log(`[i] ${kind} faucet is disabled in dry-run. Add --confirm to request it.`);
-    return;
-  }
+async function faucet(address: string, kind: "btc" | "frbtc", info?: WalletInfo, cfg?: Config, signer?: KeystoreSigner): Promise<void> {
   const endpoint = kind === "btc" ? "/faucet-btc" : "/frbtc/attest";
   const response = await fetch(`${BACKEND.replace(/\/$/, "")}${endpoint}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(kind === "btc" ? { address } : {}) });
   const body = await response.json();
@@ -372,7 +370,7 @@ async function faucet(address: string, kind: "btc" | "frbtc", info?: WalletInfo,
   }
   const attestation = raw.map((value: string | number | bigint) => BigInt(value));
   const prepared = await prepareFrbtcMint(info, cfg, attestation);
-  await signAndMaybeBroadcast(prepared, signer, confirm);
+  await signAndBroadcast(prepared, signer);
 }
 
 type SimulationResult = { execution?: { data?: string }; data?: string };
@@ -419,7 +417,7 @@ async function status(): Promise<void> {
   console.log({ address: info.address, btcSats: utxos.reduce((s, u) => s + u.sats, 0), DOHM: (totals[cfg.ids.DOHM] ?? 0n).toString(), frBTC: (totals[cfg.ids.frBTC] ?? 0n).toString(), sDOHM: (totals[cfg.ids.sDOHM] ?? 0n).toString(), lpDohmFrbtc: (totals[cfg.ids.poolDohmFrbtc] ?? 0n).toString(), utxos: utxos.length });
 }
 
-async function claimMatured(confirm: boolean): Promise<void> {
+async function claimMatured(): Promise<void> {
   const { signer, info } = await loadWallet();
   const cfg = await getConfig();
   const utxos = await walletUtxos(info.address);
@@ -431,7 +429,7 @@ async function claimMatured(confirm: boolean): Promise<void> {
       const maturity = await matureBondInfo(orbital, currentHeight);
       if (!maturity.matured) continue;
       const prepared = await prepareClaim(info, cfg, orbital);
-      await signAndMaybeBroadcast(prepared, signer, confirm);
+      await signAndBroadcast(prepared, signer);
       claimed++;
     } catch (error) { console.log(`[~] Skip ${orbital}: ${error instanceof Error ? error.message : String(error)}`); }
   }
@@ -443,15 +441,211 @@ function arg(name: string, fallback?: string): string | undefined {
   return process.argv.find((v) => v.startsWith(prefix))?.slice(prefix.length) ?? fallback;
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function askLine(rl: readline.Interface, label: string, fallback?: string): Promise<string> {
+  const suffix = fallback === undefined ? "" : ` [${fallback}]`;
+  const answer = (await rl.question(`${label}${suffix}: `)).trim();
+  return answer || fallback || "";
+}
+
+function amountEnv(name: string, fallback: string): bigint {
+  const raw = process.env[name] ?? fallback;
+  const value = BigInt(raw);
+  if (value <= 0n) throw new Error(`${name} harus lebih besar dari 0.`);
+  return value;
+}
+
+function printMenu(): void {
+  console.log("\x1b[36m────────────────────────────────────────────");
+  console.log("                 MAIN MENU");
+  console.log("────────────────────────────────────────────\x1b[0m");
+  console.log("[1] Create Wallet and Save Wallet");
+  console.log("[2] Faucet BTC + frBTC");
+  console.log("[3] Bonding");
+  console.log("[4] Claim Matured Bonds");
+  console.log("[5] Try Feature Swap");
+  console.log("[6] Stake and Unstake");
+  console.log("[7] Add Liquidity and Remove Liquidity");
+  console.log("[8] Wallet Status");
+  console.log("[9] Full Auto (All Actions)");
+  console.log("[0] Exit\n");
+}
+
+type StepResult = { label: string; success: boolean };
+
+async function runStep(results: StepResult[], label: string, action: () => Promise<void>): Promise<boolean> {
+  try {
+    console.log(`\n\x1b[34m[>] ${label}\x1b[0m`);
+    await action();
+    results.push({ label, success: true });
+    console.log(`\x1b[32m[✓] ${label} selesai\x1b[0m`);
+    return true;
+  } catch (error) {
+    results.push({ label, success: false });
+    console.log(`\x1b[31m[✗] ${label} gagal: ${error instanceof Error ? error.message : String(error)}\x1b[0m`);
+    return false;
+  }
+}
+
+function printSummary(results: StepResult[]): void {
+  const success = results.filter((result) => result.success).length;
+  const failed = results.length - success;
+  console.log("\n\x1b[36m──────────────────── SUMMARY ────────────────────\x1b[0m");
+  console.log(`\x1b[32mTotal Sukses : ${success}\x1b[0m`);
+  console.log(`\x1b[31mTotal Gagal  : ${failed}\x1b[0m`);
+  console.log(`Total Aksi   : ${results.length}`);
+  console.log("\x1b[36m──────────────────────────────────────────────────\x1b[0m\n");
+}
+
+async function waitForAssetBalance(address: string, asset: string, minimum: bigint, timeoutMs = 120000): Promise<bigint> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const utxos = await walletUtxos(address);
+    const balance = utxos.reduce((sum, utxo) => sum + (utxo.alkanes[asset] ?? 0n), 0n);
+    if (balance >= minimum) return balance;
+    await delay(5000);
+  }
+  throw new Error(`Asset ${asset} belum terindeks setelah ${Math.floor(timeoutMs / 1000)} detik.`);
+}
+
+async function waitForBtcUtxo(address: string, timeoutMs = 120000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const utxos = await walletUtxos(address);
+    if (utxos.some((utxo) => Object.values(utxo.alkanes).every((value) => value === 0n) && utxo.sats > DUST)) return;
+    await delay(5000);
+  }
+  throw new Error("BTC faucet belum menghasilkan UTXO fee yang terkonfirmasi.");
+}
+
+async function runStakeUnstake(info: WalletInfo, cfg: Config, signer: KeystoreSigner, results: StepResult[]): Promise<void> {
+  const amount = amountEnv("DOHM_DEFAULT_STAKE_AMOUNT", "1000000");
+  const staked = await runStep(results, `Stake ${amount}`, async () => {
+    const prepared = await prepareStake(info, cfg, amount, false);
+    await signAndBroadcast(prepared, signer);
+  });
+  if (staked) {
+    await runStep(results, "Wait for sDOHM balance", async () => {
+      await waitForAssetBalance(info.address, cfg.ids.sDOHM, amount);
+    });
+  }
+  await runStep(results, `Unstake ${amount}`, async () => {
+    const prepared = await prepareStake(info, cfg, amount, true);
+    await signAndBroadcast(prepared, signer);
+  });
+}
+
+async function runLiquidityCycle(info: WalletInfo, cfg: Config, signer: KeystoreSigner, results: StepResult[]): Promise<void> {
+  const dohm = amountEnv("DOHM_DEFAULT_DOHM_LIQUIDITY", "1000000");
+  const frbtc = amountEnv("DOHM_DEFAULT_FRBTC_LIQUIDITY", "1000000");
+  const added = await runStep(results, `Add liquidity DOHM=${dohm} frBTC=${frbtc}`, async () => {
+    const prepared = await prepareAddLiquidity(info, cfg, dohm, frbtc);
+    await signAndBroadcast(prepared, signer);
+  });
+  if (!added) return;
+  const pool = cfg.ids.poolDohmFrbtc;
+  await runStep(results, "Wait for LP balance", async () => {
+    await waitForAssetBalance(info.address, pool, 1n);
+  });
+  await runStep(results, "Remove liquidity", async () => {
+    const utxos = await walletUtxos(info.address);
+    const balance = utxos.reduce((sum, utxo) => sum + (utxo.alkanes[pool] ?? 0n), 0n);
+    const configured = BigInt(process.env.DOHM_DEFAULT_REMOVE_LIQUIDITY ?? "0");
+    const amount = configured > 0n && configured < balance ? configured : balance;
+    if (amount <= 0n) throw new Error("LP balance kosong, tidak ada liquidity untuk di-remove.");
+    const prepared = await prepareRemoveLiquidity(info, cfg, amount);
+    await signAndBroadcast(prepared, signer);
+  });
+}
+
+async function runFullAuto(info: WalletInfo, cfg: Config, signer: KeystoreSigner): Promise<void> {
+  const results: StepResult[] = [];
+  await runStep(results, "BTC faucet", async () => faucet(info.address, "btc"));
+  await runStep(results, "Wait for BTC fee UTXO", async () => waitForBtcUtxo(info.address));
+  await runStep(results, "frBTC faucet and mint", async () => faucet(info.address, "frbtc", info, cfg, signer));
+  await runStep(results, "Wait for frBTC balance", async () => { await waitForAssetBalance(info.address, cfg.ids.frBTC, 1n); });
+  await runStep(results, "Bonding", async () => {
+    const amount = amountEnv("DOHM_DEFAULT_BOND_SATS", "10000");
+    const prepared = await prepareBond(info, cfg, amount, Number(cfg.params.frbtcMarketId), cfg.ids.frBTC);
+    await signAndBroadcast(prepared, signer);
+  });
+  await runStep(results, "Swap", async () => {
+    const amount = amountEnv("DOHM_DEFAULT_SWAP_AMOUNT", "1000000");
+    const sellDohm = (process.env.DOHM_SWAP_DIRECTION ?? "dohm-to-frbtc") === "dohm-to-frbtc";
+    const prepared = await prepareSwap(info, cfg, amount, sellDohm);
+    await signAndBroadcast(prepared, signer);
+  });
+  await runStakeUnstake(info, cfg, signer, results);
+  await runLiquidityCycle(info, cfg, signer, results);
+  await runStep(results, "Claim matured bonds", async () => claimMatured());
+  printSummary(results);
+}
+
+async function interactiveMenu(): Promise<void> {
+  const rl = readline.createInterface({ input, output });
+  try {
+    while (true) {
+      printMenu();
+      const choice = await askLine(rl, "Select option");
+      if (choice === "0") return;
+      if (choice === "1") {
+        try { await createWallet(); } catch (error) { console.log(`\x1b[31m[✗] ${error instanceof Error ? error.message : String(error)}\x1b[0m`); }
+        continue;
+      }
+      if (choice === "9") {
+        const { signer, info } = await loadWallet();
+        const cfg = await getConfig();
+        await runFullAuto(info, cfg, signer);
+        continue;
+      }
+      const { signer, info } = await loadWallet();
+      const cfg = await getConfig();
+      const results: StepResult[] = [];
+      switch (choice) {
+        case "2":
+          await runStep(results, "BTC faucet", async () => faucet(info.address, "btc"));
+          await runStep(results, "frBTC faucet and mint", async () => faucet(info.address, "frbtc", info, cfg, signer));
+          break;
+        case "3":
+          await runStep(results, "Bonding", async () => {
+            const amount = amountEnv("DOHM_DEFAULT_BOND_SATS", "10000");
+            const prepared = await prepareBond(info, cfg, amount, Number(cfg.params.frbtcMarketId), cfg.ids.frBTC);
+            await signAndBroadcast(prepared, signer);
+          });
+          break;
+        case "4": await runStep(results, "Claim matured bonds", async () => claimMatured()); break;
+        case "5":
+          await runStep(results, "Swap", async () => {
+            const amount = amountEnv("DOHM_DEFAULT_SWAP_AMOUNT", "1000000");
+            const sellDohm = (process.env.DOHM_SWAP_DIRECTION ?? "dohm-to-frbtc") === "dohm-to-frbtc";
+            const prepared = await prepareSwap(info, cfg, amount, sellDohm);
+            await signAndBroadcast(prepared, signer);
+          });
+          break;
+        case "6": await runStakeUnstake(info, cfg, signer, results); break;
+        case "7": await runLiquidityCycle(info, cfg, signer, results); break;
+        case "8": await runStep(results, "Wallet status", async () => status()); break;
+        default: console.log("[!] Pilihan tidak dikenal.");
+      }
+      printSummary(results);
+    }
+  } finally {
+    rl.close();
+  }
+}
+
 async function main(): Promise<void> {
   banner();
   const [command, subcommand] = process.argv.slice(2).filter((v) => !v.startsWith("--"));
-  const confirm = process.argv.includes("--confirm");
+  if (!command) return interactiveMenu();
   if (command === "wallet" && subcommand === "create") return createWallet();
   if (command === "faucet") {
     const { signer, info } = await loadWallet();
     const cfg = subcommand === "frbtc" ? await getConfig() : undefined;
-    return faucet(info.address, subcommand as "btc" | "frbtc", info, cfg, signer, confirm);
+    return faucet(info.address, subcommand as "btc" | "frbtc", info, cfg, signer);
   }
   if (command === "status") return status();
   const { signer, info } = await loadWallet();
@@ -465,10 +659,10 @@ async function main(): Promise<void> {
     case "unstake": prepared = await prepareStake(info, cfg, amount, true); break;
     case "add-liquidity": prepared = await prepareAddLiquidity(info, cfg, BigInt(arg("dohm", "0")!), BigInt(arg("frbtc", "0")!), BigInt(arg("min-dohm", "0")!), BigInt(arg("min-frbtc", "0")!)); break;
     case "remove-liquidity": prepared = await prepareRemoveLiquidity(info, cfg, amount, BigInt(arg("min-dohm", "0")!), BigInt(arg("min-frbtc", "0")!)); break;
-    case "claim-matured": return claimMatured(confirm);
+    case "claim-matured": return claimMatured();
     default: throw new Error("Unknown command. See README.md for commands.");
   }
-  await signAndMaybeBroadcast(prepared, signer, confirm);
+  await signAndBroadcast(prepared, signer);
 }
 
 main().catch((error) => { console.error(`\x1b[31m[✗] ${error instanceof Error ? error.message : String(error)}\x1b[0m`); process.exitCode = 1; });
