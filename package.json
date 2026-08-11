@@ -10,8 +10,11 @@
   },
   "dependencies": {
     "@alkanes/ts-sdk": "https://pkg.alkanes.build/dist/@alkanes/ts-sdk?v=0.1.6-669e7c0",
+    "bip32": "^4.0.0",
+    "bip39": "^3.1.0",
     "bitcoinjs-lib": "^6.1.7",
-    "dotenv": "^16.4.7"
+    "dotenv": "^16.4.7",
+    "tiny-secp256k1": "^2.2.4"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",

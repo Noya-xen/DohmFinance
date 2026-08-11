@@ -4,6 +4,9 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import * as bitcoin from "bitcoinjs-lib";
+import { BIP32Factory } from "bip32";
+import * as bip39 from "bip39";
+import * as ecc from "tiny-secp256k1";
 import {
   createKeystore,
   KeystoreSigner,
@@ -39,6 +42,8 @@ const WALLET_FILE = process.env.DOHM_WALLET_FILE ?? "wallet.json";
 const FEE_RATE = Number(process.env.DOHM_FEE_RATE ?? "2");
 const DUST = 546;
 const NETWORK = bitcoin.networks.regtest;
+const bip32 = BIP32Factory(ecc);
+bitcoin.initEccLib(ecc);
 
 function id(s: string): Id {
   const [block, tx] = s.split(":").map(BigInt);
@@ -47,6 +52,16 @@ function id(s: string): Id {
 
 function key(v: Id): string {
   return `${v.block}:${v.tx}`;
+}
+
+function deriveAccount(mnemonic: string): { address: string; publicKey: string; addressType: "p2wpkh" } {
+  if (!bip39.validateMnemonic(mnemonic)) throw new Error("Encrypted keystore contains an invalid mnemonic.");
+  const root = bip32.fromSeed(bip39.mnemonicToSeedSync(mnemonic), NETWORK);
+  const node = root.derivePath("m/84'/1'/0'/0/0");
+  const pubkey = Buffer.from(node.publicKey);
+  const address = bitcoin.payments.p2wpkh({ pubkey, network: NETWORK }).address;
+  if (!address) throw new Error("Could not derive a regtest wallet address.");
+  return { address, publicKey: pubkey.toString("hex"), addressType: "p2wpkh" };
 }
 
 function printCredit(): void {
@@ -88,7 +103,7 @@ async function loadWallet(): Promise<{ signer: KeystoreSigner; info: WalletInfo 
     network: "regtest",
     addressType: "p2wpkh",
   });
-  const account = await signer.getAccount();
+  const account = deriveAccount(signer.exportMnemonic());
   if (account.address !== info.address) {
     throw new Error("Wallet address does not match the encrypted keystore.");
   }
@@ -100,12 +115,12 @@ async function createWallet(): Promise<void> {
     throw new Error(`${WALLET_FILE} already exists; refusing to overwrite it.`);
   }
   const password = requirePassword();
-  const { keystore } = await createKeystore(password, { network: "regtest", wordCount: 12 });
+  const { keystore, mnemonic } = await createKeystore(password, { network: "regtest", wordCount: 12 });
   const signer = await KeystoreSigner.fromEncrypted(keystore, password, {
     network: "regtest",
     addressType: "p2wpkh",
   });
-  const account = await signer.getAccount();
+  const account = deriveAccount(mnemonic);
   const info: WalletInfo = {
     keystore: typeof keystore === "string" ? keystore : JSON.stringify(keystore),
     network: "regtest",
