@@ -30,8 +30,17 @@ Menu menyediakan satu-run workflow seperti:
 [7] Add Liquidity and Remove Liquidity
 [8] Wallet Status
 [9] Full Auto (All Actions)
+[B] Backup Wallet Recovery Phrase
 [0] Exit
 ```
+
+Untuk mengimpor wallet script ke website Dohm, tampilkan recovery phrase secara lokal:
+
+```powershell
+npm start -- wallet backup
+```
+
+Atau pilih `[B] Backup Wallet Recovery Phrase` di menu. Salin 12 kata tersebut ke kolom `Recovery phrase` pada form `Restore wallet`. Password website boleh berbeda dari `DOHM_WALLET_PASSWORD` karena keduanya hanya mengenkripsi wallet di tempat masing-masing.
 
 Untuk setup aset secara langsung:
 
@@ -51,7 +60,7 @@ npm start -- claim-matured
 
 Jumlah default workflow diatur melalui `.env`. Pilihan `Full Auto` menjalankan faucet, bonding, swap, stake/unstake, add/remove liquidity, dan claim matured secara sequential.
 
-`wallet.json` berisi keystore terenkripsi dan sengaja masuk `.gitignore`. Script tidak menyimpan atau mencetak mnemonic; simpan backup wallet secara offline. Jangan gunakan private key mainnet.
+`wallet.json` berisi keystore terenkripsi dan sengaja masuk `.gitignore`. Recovery phrase hanya ditampilkan melalui perintah backup yang eksplisit; simpan di password manager/catatan terenkripsi dan jangan gunakan private key mainnet.
 
 ## Catatan
 

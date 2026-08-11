@@ -135,6 +135,15 @@ async function createWallet(): Promise<void> {
   console.log("[!] Mnemonic tidak disimpan oleh script. Backup wallet.json secara aman.");
 }
 
+async function backupWallet(): Promise<void> {
+  const { signer, info } = await loadWallet();
+  console.log("\n\x1b[33m[!] Recovery phrase adalah kunci penuh wallet. Jangan kirim atau upload ke siapa pun.\x1b[0m");
+  console.log(`[i] Address: ${info.address}`);
+  console.log("[i] Recovery phrase (12 words):");
+  console.log(`\x1b[33m${signer.exportMnemonic()}\x1b[0m`);
+  console.log("[i] Simpan di password manager/catatan terenkripsi, lalu hapus dari terminal history.\n");
+}
+
 async function rpc<T>(method: string, params: unknown[] = []): Promise<T> {
   const response = await fetch(RPC_URL, {
     method: "POST",
@@ -486,6 +495,7 @@ function printMenu(): void {
   console.log("[7] Add Liquidity and Remove Liquidity");
   console.log("[8] Wallet Status");
   console.log("[9] Full Auto (All Actions)");
+  console.log("[B] Backup Wallet Recovery Phrase");
   console.log("[0] Exit\n");
 }
 
@@ -616,6 +626,10 @@ async function interactiveMenu(): Promise<void> {
         await runFullAuto(info, cfg, signer);
         continue;
       }
+      if (choice.toLowerCase() === "b") {
+        try { await backupWallet(); } catch (error) { console.log(`\x1b[31m[✗] ${error instanceof Error ? error.message : String(error)}\x1b[0m`); }
+        continue;
+      }
       const { signer, info } = await loadWallet();
       const cfg = await getConfig();
       const results: StepResult[] = [];
@@ -657,6 +671,7 @@ async function main(): Promise<void> {
   const [command, subcommand] = process.argv.slice(2).filter((v) => !v.startsWith("--"));
   if (!command) return interactiveMenu();
   if (command === "wallet" && subcommand === "create") return createWallet();
+  if (command === "wallet" && subcommand === "backup") return backupWallet();
   if (command === "faucet") {
     const { signer, info } = await loadWallet();
     const cfg = subcommand === "frbtc" ? await getConfig() : undefined;
