@@ -2,7 +2,7 @@
 
 link projek : https://testnet.dohm.finance/app/link
 
-Script TypeScript untuk aktivitas satu wallet di Dohm Testnet/Bitcoin Regtest: membuat wallet terenkripsi, meminta BTC/frBTC faucet, bonding, claim bond matang, swap, stake/unstake, serta add/remove liquidity.
+Script TypeScript untuk aktivitas wallet aktif di Dohm Testnet/Bitcoin Regtest: membuat wallet terenkripsi, meminta BTC/frBTC faucet, bonding, claim bond matang, swap, stake/unstake, serta add/remove liquidity.
 
 ## Setup
 
@@ -30,24 +30,29 @@ Menu menyediakan satu-run workflow seperti:
 [7] Add Liquidity and Remove Liquidity
 [8] Wallet Status
 [9] Full Auto (All Actions)
+[A] List Wallets
 [B] Backup Wallet Recovery Phrase
 [0] Exit
 ```
 
-Pilih `[1] Create Wallet and Save Wallet`, lalu masukkan jumlah wallet yang ingin dibuat. Satu wallet disimpan sebagai `wallet.json`; jika jumlahnya lebih dari satu, file disimpan di folder `wallets/` dengan nama `wallet-001.json`, `wallet-002.json`, dan seterusnya. Script tidak menimpa file wallet yang sudah ada.
+Pilih `[1] Create Wallet and Save Wallet`, lalu masukkan jumlah wallet yang ingin dibuat. Semua wallet disimpan dalam satu file `wallet.json` sebagai keystore terenkripsi. Jika file sudah berisi wallet, wallet baru akan ditambahkan dan tidak menimpa wallet lama.
 
 Pembuatan batch juga tersedia melalui CLI:
 
 ```powershell
 npm start -- wallet create --count=3
+npm start -- wallet list
 ```
 
-Untuk memakai salah satu wallet batch pada aksi lain, set file wallet yang aktif terlebih dahulu:
+Untuk memakai wallet tertentu pada aksi lain, gunakan index wallet. Index default adalah `1`:
 
 ```powershell
-$env:DOHM_WALLET_FILE = "wallets/wallet-001.json"
+$env:DOHM_WALLET_INDEX = "2"
 npm start -- wallet backup
+# atau: npm start -- wallet backup --wallet-index=2
 ```
+
+Jika memiliki `wallet.json` lama dengan format satu wallet, script tetap bisa membacanya. Jalankan `npm start -- wallet migrate` untuk menormalisasikannya ke format satu file yang mendukung banyak wallet.
 
 Untuk mengimpor wallet script ke website Dohm, tampilkan recovery phrase secara lokal:
 
@@ -75,13 +80,13 @@ npm start -- claim-matured
 
 Jumlah default workflow diatur melalui `.env`. Pilihan `Full Auto` menjalankan faucet, bonding, swap, stake/unstake, add/remove liquidity, dan claim matured secara sequential.
 
-`wallet.json` dan file di folder `wallets/` berisi keystore terenkripsi dan sengaja masuk `.gitignore`. Recovery phrase hanya ditampilkan melalui perintah backup yang eksplisit; simpan di password manager/catatan terenkripsi dan jangan gunakan private key mainnet.
+`wallet.json` berisi keystore terenkripsi dan sengaja masuk `.gitignore`. Recovery phrase hanya ditampilkan melalui perintah backup yang eksplisit; simpan di password manager/catatan terenkripsi dan jangan gunakan private key mainnet.
 
 ## Catatan
 
 - Dohm menggunakan Bitcoin Regtest + ALKANES, bukan EVM/RPC Ethereum.
 - Endpoint dan asset ID diambil dinamis dari endpoint konfigurasi Dohm.
-- Satu wallet diproses sequentially; tidak ada proxy rotation, stealth header, atau mass-account mode.
+- Wallet diproses satu per satu berdasarkan active wallet index; tidak ada proxy rotation atau stealth header.
 - Waktu vesting/cooldown mengikuti tinggi block testnet; claim hanya dijalankan saat bond sudah matang.
 - Semua aksi adalah transaksi nyata di testnet dan dapat memerlukan waktu indexing antar langkah.
 

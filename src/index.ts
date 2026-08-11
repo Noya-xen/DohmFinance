@@ -29,6 +29,10 @@ type WalletInfo = {
   addressType: "p2wpkh";
   createdAt: string;
 };
+type WalletStore = {
+  version: 1;
+  wallets: WalletInfo[];
+};
 type Config = {
   ids: Record<string, string>;
   params: Record<string, number | string>;
@@ -96,7 +100,12 @@ async function writePrivateJson(file: string, value: unknown): Promise<void> {
 }
 
 async function loadWallet(): Promise<{ signer: KeystoreSigner; info: WalletInfo }> {
-  const info = await readJson<WalletInfo>(WALLET_FILE);
+  const wallets = await readWalletCollection();
+  const index = selectedWalletIndex();
+  const info = wallets[index - 1];
+  if (!info) {
+    throw new Error(`Wallet index #${index} tidak tersedia. File berisi ${wallets.length} wallet.`);
+  }
   if (info.network !== "regtest" || info.addressType !== "p2wpkh") {
     throw new Error("wallet.json is not a Dohm regtest P2WPKH wallet.");
   }
@@ -119,28 +128,59 @@ function parseWalletCount(raw: string | undefined): number {
   return count;
 }
 
-function walletFileForBatch(index: number, count: number): string {
-  if (count === 1) return WALLET_FILE;
-  return path.join(path.dirname(WALLET_FILE), "wallets", `wallet-${String(index).padStart(3, "0")}.json`);
-}
-
 async function fileExists(file: string): Promise<boolean> {
   return fs.stat(file).then(() => true).catch(() => false);
 }
 
-async function createWallet(count = 1): Promise<void> {
-  const targetFiles = Array.from({ length: count }, (_, index) => walletFileForBatch(index + 1, count));
-  const existingFiles: string[] = [];
-  for (const file of targetFiles) {
-    if (await fileExists(file)) existingFiles.push(file);
-  }
-  if (existingFiles.length > 0) {
-    throw new Error(`Wallet sudah ada, tidak menimpa: ${existingFiles.join(", ")}`);
-  }
+function isWalletInfo(value: unknown): value is WalletInfo {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Partial<WalletInfo>;
+  return item.network === "regtest"
+    && item.addressType === "p2wpkh"
+    && typeof item.keystore === "string"
+    && typeof item.address === "string"
+    && typeof item.publicKey === "string"
+    && typeof item.createdAt === "string";
+}
 
+async function readWalletCollection(): Promise<WalletInfo[]> {
+  const raw = await readJson<unknown>(WALLET_FILE);
+  if (isWalletInfo(raw)) return [raw];
+  if (
+    raw && typeof raw === "object"
+    && (raw as Partial<WalletStore>).version === 1
+    && Array.isArray((raw as Partial<WalletStore>).wallets)
+    && (raw as Partial<WalletStore>).wallets!.every(isWalletInfo)
+  ) {
+    return (raw as WalletStore).wallets;
+  }
+  throw new Error(`${WALLET_FILE} bukan wallet Dohm yang valid.`);
+}
+
+async function readWalletCollectionOrEmpty(): Promise<WalletInfo[]> {
+  return (await fileExists(WALLET_FILE)) ? readWalletCollection() : [];
+}
+
+async function writeWalletCollection(wallets: WalletInfo[]): Promise<void> {
+  const store: WalletStore = { version: 1, wallets };
+  await writePrivateJson(WALLET_FILE, store);
+}
+
+function selectedWalletIndex(): number {
+  const raw = process.env.DOHM_WALLET_INDEX ?? arg("wallet-index", "1");
+  const index = Number(raw);
+  if (!Number.isInteger(index) || index < 1) {
+    throw new Error("DOHM_WALLET_INDEX/--wallet-index harus bilangan bulat mulai dari 1.");
+  }
+  return index;
+}
+
+async function createWallet(count = 1): Promise<void> {
+  const existingWallets = await readWalletCollectionOrEmpty();
+  const wallets = [...existingWallets];
   const password = requirePassword();
   let saved = 0;
-  for (const [index, file] of targetFiles.entries()) {
+  for (let index = 0; index < count; index += 1) {
     try {
       const { keystore, mnemonic } = await createKeystore(password, { network: "regtest", wordCount: 12 });
       const account = deriveAccount(mnemonic);
@@ -152,21 +192,43 @@ async function createWallet(count = 1): Promise<void> {
         addressType: "p2wpkh",
         createdAt: new Date().toISOString(),
       };
-      await writePrivateJson(file, info);
+      wallets.push(info);
       saved += 1;
-      console.log(`\x1b[32m[✓] Wallet ${index + 1}/${count} saved: ${file}\x1b[0m`);
+      console.log(`\x1b[32m[✓] Wallet baru ${index + 1}/${count} dibuat | index #${wallets.length}\x1b[0m`);
       console.log(`[i] Address: ${account.address}`);
     } catch (error) {
       console.log(`\x1b[31m[✗] Wallet ${index + 1}/${count} gagal: ${error instanceof Error ? error.message : String(error)}\x1b[0m`);
     }
   }
+  if (saved > 0) await writeWalletCollection(wallets);
   console.log(`[i] Selesai membuat wallet: ${saved}/${count}`);
-  console.log("[!] Recovery phrase tidak ditampilkan. Set DOHM_WALLET_FILE ke salah satu file lalu jalankan 'npm start -- wallet backup' jika diperlukan.");
+  console.log(`[i] Total wallet tersimpan dalam ${WALLET_FILE}: ${wallets.length}`);
+  console.log("[!] Recovery phrase tidak ditampilkan. Gunakan wallet index saat backup jika diperlukan.");
+}
+
+async function listWallets(): Promise<void> {
+  const wallets = await readWalletCollection();
+  const active = selectedWalletIndex();
+  console.log(`\n[i] Wallet store: ${WALLET_FILE}`);
+  for (const [index, wallet] of wallets.entries()) {
+    const marker = index + 1 === active ? " (active)" : "";
+    console.log(`[#${index + 1}]${marker} ${wallet.address} | created ${wallet.createdAt}`);
+  }
+  console.log(`[i] Total wallet: ${wallets.length}`);
+}
+
+async function migrateWalletStore(): Promise<void> {
+  const wallets = await readWalletCollection();
+  await writeWalletCollection(wallets);
+  console.log(`[✓] Wallet store dinormalisasi ke format satu file: ${WALLET_FILE}`);
+  console.log(`[i] Total wallet: ${wallets.length}`);
 }
 
 async function backupWallet(): Promise<void> {
+  const index = selectedWalletIndex();
   const { signer, info } = await loadWallet();
   console.log("\n\x1b[33m[!] Recovery phrase adalah kunci penuh wallet. Jangan kirim atau upload ke siapa pun.\x1b[0m");
+  console.log(`[i] Wallet index: ${index}`);
   console.log(`[i] Address: ${info.address}`);
   console.log("[i] Recovery phrase (12 words):");
   console.log(`\x1b[33m${signer.exportMnemonic()}\x1b[0m`);
@@ -524,6 +586,7 @@ function printMenu(): void {
   console.log("[7] Add Liquidity and Remove Liquidity");
   console.log("[8] Wallet Status");
   console.log("[9] Full Auto (All Actions)");
+  console.log("[A] List Wallets");
   console.log("[B] Backup Wallet Recovery Phrase");
   console.log("[0] Exit\n");
 }
@@ -658,6 +721,10 @@ async function interactiveMenu(): Promise<void> {
         await runFullAuto(info, cfg, signer);
         continue;
       }
+      if (choice.toLowerCase() === "a") {
+        try { await listWallets(); } catch (error) { console.log(`\x1b[31m[✗] ${error instanceof Error ? error.message : String(error)}\x1b[0m`); }
+        continue;
+      }
       if (choice.toLowerCase() === "b") {
         try { await backupWallet(); } catch (error) { console.log(`\x1b[31m[✗] ${error instanceof Error ? error.message : String(error)}\x1b[0m`); }
         continue;
@@ -703,6 +770,8 @@ async function main(): Promise<void> {
   const [command, subcommand] = process.argv.slice(2).filter((v) => !v.startsWith("--"));
   if (!command) return interactiveMenu();
   if (command === "wallet" && subcommand === "create") return createWallet(parseWalletCount(arg("count")));
+  if (command === "wallet" && subcommand === "list") return listWallets();
+  if (command === "wallet" && subcommand === "migrate") return migrateWalletStore();
   if (command === "wallet" && subcommand === "backup") return backupWallet();
   if (command === "faucet") {
     const { signer, info } = await loadWallet();
