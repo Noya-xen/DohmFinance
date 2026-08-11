@@ -54,6 +54,8 @@ npm start -- wallet backup
 
 Jika memiliki `wallet.json` lama dengan format satu wallet, script tetap bisa membacanya. Jalankan `npm start -- wallet migrate` untuk menormalisasikannya ke format satu file yang mendukung banyak wallet.
 
+Jika `wallet.json` kosong, pilih menu `[1]` dan file akan diinisialisasi ulang dengan aman. Jika file berisi JSON rusak, jangan hapus sebelum memastikan ada backup karena file tersebut mungkin berisi wallet yang perlu dipulihkan.
+
 Untuk mengimpor wallet script ke website Dohm, tampilkan recovery phrase secara lokal:
 
 ```powershell

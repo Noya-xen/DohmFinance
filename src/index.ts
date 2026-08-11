@@ -144,7 +144,15 @@ function isWalletInfo(value: unknown): value is WalletInfo {
 }
 
 async function readWalletCollection(): Promise<WalletInfo[]> {
-  const raw = await readJson<unknown>(WALLET_FILE);
+  const content = await fs.readFile(WALLET_FILE, "utf8");
+  if (!content.trim()) return [];
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(content) as unknown;
+  } catch {
+    throw new Error(`${WALLET_FILE} berisi JSON tidak valid atau belum lengkap. Pulihkan dari backup wallet sebelum melanjutkan.`);
+  }
   if (isWalletInfo(raw)) return [raw];
   if (
     raw && typeof raw === "object"
