@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+wallet.json
+wallets/
+*.log
+*.seed
+*.mnemonic
