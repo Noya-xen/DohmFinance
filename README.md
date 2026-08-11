@@ -90,6 +90,7 @@ Jumlah default workflow diatur melalui `.env`. Pilihan `Full Auto` menjalankan f
 
 - Dohm menggunakan Bitcoin Regtest + ALKANES, bukan EVM/RPC Ethereum.
 - Endpoint dan asset ID diambil dinamis dari endpoint konfigurasi Dohm.
+- Faucet mengikuti proxy deployment Dohm melalui `DOHM_DEV_API_URL` (default: `https://dohmapi-next.localtests.xyz/dev-api`), bukan endpoint backend `/api` secara langsung.
 - Wallet diproses satu per satu berdasarkan active wallet index; tidak ada proxy rotation atau stealth header.
 - Waktu vesting/cooldown mengikuti tinggi block testnet; claim hanya dijalankan saat bond sudah matang.
 - Semua aksi adalah transaksi nyata di testnet dan dapat memerlukan waktu indexing antar langkah.

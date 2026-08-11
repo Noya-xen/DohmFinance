@@ -42,6 +42,7 @@ type PreparedTx = { psbtBase64: string; action: string };
 const BACKEND = process.env.DOHM_BACKEND_URL ?? "https://dohmapi-next.localtests.xyz/api";
 const RPC_URL = process.env.DOHM_RPC_URL ?? "https://dohmapi-next.localtests.xyz/rpc";
 const ESPLORA_URL = process.env.DOHM_ESPLORA_URL ?? "https://dohmapi-next.localtests.xyz/esplora";
+const DEV_API_URL = process.env.DOHM_DEV_API_URL ?? defaultDevApiUrl(BACKEND);
 const WALLET_FILE = process.env.DOHM_WALLET_FILE ?? "wallet.json";
 const MAX_WALLET_BATCH = 100;
 const FEE_RATE = Number(process.env.DOHM_FEE_RATE ?? "2");
@@ -52,6 +53,14 @@ const LEGACY_DERIVATION_PATH = "m/84'/1'/0'/0/0";
 const bip32 = BIP32Factory(ecc);
 const ECPair = ECPairFactory(ecc);
 bitcoin.initEccLib(ecc);
+
+function defaultDevApiUrl(backendUrl: string): string {
+  try {
+    return `${new URL(backendUrl).origin}/dev-api`;
+  } catch {
+    return "";
+  }
+}
 
 function id(s: string): Id {
   const [block, tx] = s.split(":").map(BigInt);
@@ -514,7 +523,14 @@ async function prepareRemoveLiquidity(account: WalletInfo, cfg: Config, amount: 
   const [first, second] = reversed ? [token1, token0] : [token0, token1];
   const [firstMin, secondMin] = reversed ? [minFrbtc, minDohm] : [minDohm, minFrbtc];
   const args = [first.block, first.tx, second.block, second.tx, amount, firstMin, secondMin, 10000000000n];
-  const script = protostone(cell(id(cfg.ids.ammRouter), 12, args), assetEdict(pool, picked.carried, 1));
+  const otherAssets = new Map<string, bigint>();
+  for (const utxo of picked.selected) {
+    for (const [asset, assetAmount] of Object.entries(utxo.alkanes)) {
+      if (asset !== key(pool) && assetAmount > 0n) otherAssets.set(asset, (otherAssets.get(asset) ?? 0n) + assetAmount);
+    }
+  }
+  const carriedEdicts = [...otherAssets.entries()].flatMap(([asset, assetAmount]) => assetEdict(id(asset), assetAmount, 1));
+  const script = protostone(cell(id(cfg.ids.ammRouter), 12, args), [...assetEdict(pool, picked.carried, 1), ...carriedEdicts]);
   return buildPsbt(account, [...picked.selected, fee], script, 2, "remove-liquidity");
 }
 
@@ -535,9 +551,16 @@ async function signAndBroadcast(prepared: PreparedTx, signer: DohmSigner): Promi
 }
 
 async function faucet(address: string, kind: "btc" | "frbtc", info?: WalletInfo, cfg?: Config, signer?: DohmSigner): Promise<void> {
-  const endpoint = kind === "btc" ? "/faucet-btc" : "/frbtc/attest";
-  const response = await fetch(`${BACKEND.replace(/\/$/, "")}${endpoint}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(kind === "btc" ? { address } : {}) });
-  const body = await response.json();
+  if (!DEV_API_URL) throw new Error("DOHM_DEV_API_URL tidak valid. Isi dengan URL proxy faucet Dohm, contoh: https://dohmapi-next.localtests.xyz/dev-api");
+  const endpoint = kind === "btc" ? "/api/faucet-btc" : "/api/frbtc/attest";
+  const response = await fetch(`${DEV_API_URL.replace(/\/$/, "")}${endpoint}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(kind === "btc" ? { address } : {}) });
+  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (response.status === 429) {
+    throw new Error(`${kind} faucet cooldown${body.remainingSeconds ? `: tunggu ${body.remainingSeconds} detik` : ""}.`);
+  }
+  if (response.status === 503) {
+    throw new Error(`${kind} faucet sedang kehabisan dana${body.retryAfterSeconds ? `: coba lagi dalam ${body.retryAfterSeconds} detik` : "."}`);
+  }
   if (!response.ok) throw new Error(`${kind} faucet HTTP ${response.status}: ${JSON.stringify(body)}`);
   if (kind === "btc") {
     console.log(`\x1b[32m[✓] BTC faucet request accepted:\x1b[0m`, body);
