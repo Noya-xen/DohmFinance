@@ -22,14 +22,14 @@ Menu menyediakan satu-run workflow seperti:
 
 ```text
 [1] Create Wallet and Save Wallet
-[2] Faucet BTC + frBTC
+[2] Faucet BTC + frBTC untuk semua wallet secara serial
 [3] Bonding
 [4] Claim Matured Bonds
 [5] Try Feature Swap
 [6] Stake and Unstake
 [7] Add Liquidity and Remove Liquidity
 [8] Wallet Status
-[9] Full Auto (All Actions)
+[9] Full Auto semua wallet secara serial
 [A] List Wallets
 [B] Backup Wallet Recovery Phrase
 [0] Exit
@@ -44,6 +44,18 @@ npm start -- wallet create --count=3
 npm start -- wallet list
 ```
 
+Pilihan `[2]` dan `[9]` memproses semua wallet dalam `wallet.json` satu per satu. Satu akun harus menyelesaikan langkahnya terlebih dahulu sebelum akun berikutnya dimulai; tidak ada proses paralel.
+
+Urutan `[9] Full Auto` adalah:
+
+```text
+BTC faucet → tunggu BTC terkonfirmasi → frBTC faucet/mint → tunggu saldo
+→ swap frBTC → DOHM → tunggu settle
+→ swap DOHM → DIESEL/FIRE → tunggu settle
+→ bond signed → tunggu bond settle → stake → tunggu → unstake → tunggu
+→ add/remove liquidity → claim matured bond
+```
+
 Untuk memakai wallet tertentu pada aksi lain, gunakan index wallet. Index default adalah `1`:
 
 ```powershell
@@ -52,7 +64,7 @@ npm start -- wallet backup
 # atau: npm start -- wallet backup --wallet-index=2
 ```
 
-Menu dan perintah faucet juga hanya memakai satu wallet aktif dalam satu kali proses. Contoh untuk wallet #2:
+Perintah faucet langsung memakai satu wallet aktif. Contoh untuk wallet #2:
 
 ```powershell
 $env:DOHM_WALLET_INDEX = "2"
@@ -61,7 +73,9 @@ npm start -- faucet btc
 npm start -- faucet frbtc
 ```
 
-Faucet BTC dan frBTC tidak boleh dijalankan bersamaan: script akan menunggu UTXO BTC yang sudah terkonfirmasi sebelum mencoba mint frBTC.
+Faucet BTC dan frBTC tidak dijalankan bersamaan: script menunggu UTXO BTC terkonfirmasi dan menunggu saldo frBTC terindeks sebelum melanjutkan.
+
+Konfigurasi workflow utama ada di `.env`: `DOHM_BOND_ASSET=DIESEL` atau `FIRE`, `DOHM_DEFAULT_RESERVE_SWAP_AMOUNT`, `DOHM_DEFAULT_BOND_AMOUNT`, `DOHM_DEFAULT_STAKE_AMOUNT`, `DOHM_SETTLE_TIMEOUT_MS`, dan `DOHM_ACCOUNT_DELAY_MS`. Timeout settle default 15 menit karena status swap di website dapat berada pada tahap `SETTLING` beberapa menit.
 
 Jika memiliki `wallet.json` lama dengan format satu wallet terenkripsi, script tetap bisa membacanya. Jalankan `npm start -- wallet migrate` untuk mengubahnya menjadi format plaintext; password lama hanya diperlukan satu kali saat migrasi.
 
@@ -83,17 +97,19 @@ Untuk setup aset secara langsung:
 npm start -- faucet btc
 npm start -- faucet frbtc
 npm start -- status
+npm start -- full-auto
 ```
 
 Perintah CLI langsung juga tersedia dan langsung menandatangani serta broadcast transaksi:
 
 ```powershell
 npm start -- bond --amount=10000
-npm start -- swap --direction=dohm-to-frbtc --amount=1000000
+npm start -- swap --direction=frbtc-to-dohm --amount=1000000
+npm start -- swap --direction=dohm-to-fire --amount=1000000
 npm start -- claim-matured
 ```
 
-Jumlah default workflow diatur melalui `.env`. Pilihan `Full Auto` menjalankan faucet, bonding, swap, stake/unstake, add/remove liquidity, dan claim matured secara sequential.
+Jumlah default workflow diatur melalui `.env`. Bond single-asset mengikuti market aktif Dohm dan memakai attestation endpoint `/api/bond/attest`; market yang dipilih hanya DIESEL atau FIRE. Swap menunggu saldo output terindeks sebagai tanda settle sebelum langkah berikutnya.
 
 `wallet.json` berisi recovery phrase plaintext untuk kemudahan testnet dan sengaja masuk `.gitignore`. Jangan upload, commit, atau bagikan file ini. Jangan gunakan format plaintext ini untuk wallet mainnet.
 
@@ -102,7 +118,7 @@ Jumlah default workflow diatur melalui `.env`. Pilihan `Full Auto` menjalankan f
 - Dohm menggunakan Bitcoin Regtest + ALKANES, bukan EVM/RPC Ethereum.
 - Endpoint dan asset ID diambil dinamis dari endpoint konfigurasi Dohm.
 - Faucet mengikuti proxy deployment Dohm melalui `DOHM_DEV_API_URL` (default: `https://dohmapi-next.localtests.xyz/dev-api`), bukan endpoint backend `/api` secara langsung.
-- Wallet diproses satu per satu berdasarkan active wallet index; tidak ada proxy rotation atau stealth header.
+- Menu Full Auto dan Faucet memproses semua wallet satu per satu; perintah CLI individual tetap memakai active wallet index. Tidak ada proxy rotation atau stealth header.
 - Waktu vesting/cooldown mengikuti tinggi block testnet; claim hanya dijalankan saat bond sudah matang.
 - Semua aksi adalah transaksi nyata di testnet dan dapat memerlukan waktu indexing antar langkah.
 

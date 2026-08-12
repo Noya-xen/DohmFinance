@@ -37,6 +37,14 @@ type Config = {
   ids: Record<string, string>;
   params: Record<string, number | string>;
 };
+type BondMarket = {
+  id: number;
+  capacity: string;
+  maxPayout: string;
+  vestingBlocks: string;
+  isLp: boolean;
+  reserveId: string;
+};
 type PreparedTx = { psbtBase64: string; action: string };
 
 const BACKEND = process.env.DOHM_BACKEND_URL ?? "https://dohmapi-next.localtests.xyz/api";
@@ -47,6 +55,8 @@ const WALLET_FILE = process.env.DOHM_WALLET_FILE ?? "wallet.json";
 const MAX_WALLET_BATCH = 100;
 const FEE_RATE = Number(process.env.DOHM_FEE_RATE ?? "2");
 const DUST = 546;
+const POLL_INTERVAL_MS = Number(process.env.DOHM_POLL_INTERVAL_MS ?? "10000");
+const SETTLE_TIMEOUT_MS = Number(process.env.DOHM_SETTLE_TIMEOUT_MS ?? "900000");
 const NETWORK = bitcoin.networks.regtest;
 const DOHM_DERIVATION_PATH = "m/84'/0'/0'/0/0";
 const LEGACY_DERIVATION_PATH = "m/84'/1'/0'/0/0";
@@ -65,6 +75,11 @@ function defaultDevApiUrl(backendUrl: string): string {
 function id(s: string): Id {
   const [block, tx] = s.split(":").map(BigInt);
   return { block, tx };
+}
+
+function normalizeAssetName(value: string): string {
+  const aliases: Record<string, string> = { btc: "BTC", frbtc: "frBTC", frusd: "frUSD", dohm: "DOHM", sdohm: "sDOHM", diesel: "DIESEL", fire: "FIRE" };
+  return aliases[value.trim().toLowerCase()] ?? value.trim();
 }
 
 function key(v: Id): string {
@@ -152,9 +167,8 @@ async function writePrivateJson(file: string, value: unknown): Promise<void> {
   await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
-async function loadWallet(): Promise<{ signer: DohmSigner; info: WalletInfo }> {
+async function loadWalletAt(index: number): Promise<{ signer: DohmSigner; info: WalletInfo }> {
   const wallets = await readWalletCollection();
-  const index = selectedWalletIndex();
   const info = wallets[index - 1];
   if (!info) {
     throw new Error(`Wallet index #${index} tidak tersedia. File berisi ${wallets.length} wallet.`);
@@ -172,6 +186,10 @@ async function loadWallet(): Promise<{ signer: DohmSigner; info: WalletInfo }> {
     throw new Error("Wallet address does not match the recovery phrase.");
   }
   return { signer, info };
+}
+
+async function loadWallet(): Promise<{ signer: DohmSigner; info: WalletInfo }> {
+  return loadWalletAt(selectedWalletIndex());
 }
 
 function parseWalletCount(raw: string | undefined): number {
@@ -343,6 +361,39 @@ async function getConfig(): Promise<Config> {
   };
 }
 
+async function getBondMarkets(): Promise<BondMarket[]> {
+  const response = await fetch(`${BACKEND.replace(/\/$/, "")}/markets`);
+  if (!response.ok) throw new Error(`markets HTTP ${response.status}`);
+  const raw = await response.json() as { data?: BondMarket[] };
+  if (!Array.isArray(raw.data)) throw new Error("Response markets Dohm tidak valid.");
+  return raw.data;
+}
+
+async function resolveBondMarket(cfg: Config, assetName: "DIESEL" | "FIRE"): Promise<BondMarket> {
+  const reserveId = cfg.ids[assetName];
+  const markets = await getBondMarkets();
+  const market = markets
+    .filter((item) => !item.isLp && item.reserveId === reserveId)
+    .find((item) => BigInt(item.capacity) > 0n);
+  if (!market) throw new Error(`Market bond ${assetName} tidak tersedia atau sudah sold out.`);
+  return market;
+}
+
+async function getBondAttestation(marketId: number): Promise<bigint[]> {
+  const response = await fetch(`${BACKEND.replace(/\/$/, "")}/bond/attest`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ marketId }),
+  });
+  const body = await response.json().catch(() => ({})) as { attestation?: Array<string | number> };
+  if (!response.ok || !Array.isArray(body.attestation)) {
+    throw new Error(`bond attestation HTTP ${response.status}: ${JSON.stringify(body)}`);
+  }
+  const attestation = body.attestation.map((value) => BigInt(value));
+  if (attestation.length !== 11) throw new Error("Bond attestation tidak berisi 11 u128 words.");
+  return attestation;
+}
+
 function reverseTxid(txid: string): string {
   return txid.match(/../g)!.reverse().join("");
 }
@@ -468,12 +519,13 @@ async function prepareAssetTx(account: WalletInfo, asset: string, amount: bigint
   return buildPsbt(account, [...picked.selected, fee], script, leadingOutputs, action);
 }
 
-async function prepareBond(account: WalletInfo, cfg: Config, amount: bigint, marketId: number, reserveId: string): Promise<PreparedTx> {
+async function prepareBond(account: WalletInfo, cfg: Config, amount: bigint, marketId: number, reserveId: string, attestation: bigint[]): Promise<PreparedTx> {
+  if (attestation.length !== 11) throw new Error("Bond attestation tidak berisi 11 u128 words.");
   const utxos = await walletUtxos(account.address);
   const picked = chooseAsset(utxos, reserveId, amount);
   const fee = feeUtxo(utxos, picked.selected);
-  const script = protostone(cell(id(cfg.ids.bonds), 2, [BigInt(marketId), amount, 0n]), assetEdict(id(reserveId), picked.carried));
-  return buildPsbt(account, [...picked.selected, fee], script, 1, "bond");
+  const script = protostone(cell(id(cfg.ids.bonds), 15, [BigInt(marketId), amount, 0n, BigInt(attestation.length), ...attestation]), assetEdict(id(reserveId), picked.carried));
+  return buildPsbt(account, [...picked.selected, fee], script, 1, "bond-signed");
 }
 
 async function prepareClaim(account: WalletInfo, cfg: Config, orbital: string): Promise<PreparedTx> {
@@ -492,12 +544,14 @@ async function prepareStake(account: WalletInfo, cfg: Config, amount: bigint, un
   return prepareAssetTx(account, asset, amount, script, unstake ? "unstake" : "stake");
 }
 
-async function prepareSwap(account: WalletInfo, cfg: Config, amount: bigint, sellDohm: boolean, minOut = 0n): Promise<PreparedTx> {
-  const tokenIn = id(sellDohm ? cfg.ids.DOHM : cfg.ids.frBTC);
-  const tokenOut = id(sellDohm ? cfg.ids.frBTC : cfg.ids.DOHM);
+async function prepareSwap(account: WalletInfo, cfg: Config, amount: bigint, tokenInName: string, tokenOutName: string, minOut = 0n): Promise<PreparedTx> {
+  tokenInName = normalizeAssetName(tokenInName);
+  tokenOutName = normalizeAssetName(tokenOutName);
+  const tokenIn = id(cfg.ids[tokenInName]);
+  const tokenOut = id(cfg.ids[tokenOutName]);
   const args = [2n, tokenIn.block, tokenIn.tx, tokenOut.block, tokenOut.tx, amount, minOut, 10000000000n];
   const script = protostone(cell(id(cfg.ids.ammRouter), 13, args), assetEdict(tokenIn, amount));
-  return prepareAssetTx(account, key(tokenIn), amount, script, "swap");
+  return prepareAssetTx(account, key(tokenIn), amount, script, `swap:${tokenInName}->${tokenOutName}`);
 }
 
 async function prepareAddLiquidity(account: WalletInfo, cfg: Config, dohm: bigint, frbtc: bigint, minDohm = 0n, minFrbtc = 0n): Promise<PreparedTx> {
@@ -620,9 +674,7 @@ async function status(): Promise<void> {
   console.log({ address: info.address, btcSats: utxos.reduce((s, u) => s + u.sats, 0), DOHM: (totals[cfg.ids.DOHM] ?? 0n).toString(), frBTC: (totals[cfg.ids.frBTC] ?? 0n).toString(), sDOHM: (totals[cfg.ids.sDOHM] ?? 0n).toString(), lpDohmFrbtc: (totals[cfg.ids.poolDohmFrbtc] ?? 0n).toString(), utxos: utxos.length });
 }
 
-async function claimMatured(): Promise<void> {
-  const { signer, info } = await loadWallet();
-  const cfg = await getConfig();
+async function claimMaturedForWallet(info: WalletInfo, cfg: Config, signer: DohmSigner): Promise<void> {
   const utxos = await walletUtxos(info.address);
   const currentHeight = Number(await rpc<number>("btc_getblockcount"));
   const bondKeys = [...new Set(utxos.flatMap((u) => Object.keys(u.alkanes).filter((asset) => asset.startsWith("2:"))))];
@@ -637,6 +689,12 @@ async function claimMatured(): Promise<void> {
     } catch (error) { console.log(`[~] Skip ${orbital}: ${error instanceof Error ? error.message : String(error)}`); }
   }
   console.log(`[i] Matured bond claims prepared: ${claimed} | current height: ${currentHeight}`);
+}
+
+async function claimMatured(): Promise<void> {
+  const { signer, info } = await loadWallet();
+  const cfg = await getConfig();
+  return claimMaturedForWallet(info, cfg, signer);
 }
 
 function arg(name: string, fallback?: string): string | undefined {
@@ -705,41 +763,71 @@ function printSummary(results: StepResult[]): void {
   console.log("\x1b[36m──────────────────────────────────────────────────\x1b[0m\n");
 }
 
-async function waitForAssetBalance(address: string, asset: string, minimum: bigint, timeoutMs = 120000): Promise<bigint> {
+async function assetBalance(address: string, asset: string): Promise<bigint> {
+  const utxos = await walletUtxos(address);
+  return utxos.reduce((sum, utxo) => sum + (utxo.alkanes[asset] ?? 0n), 0n);
+}
+
+async function waitForAssetBalance(address: string, asset: string, minimum: bigint, timeoutMs = SETTLE_TIMEOUT_MS): Promise<bigint> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const utxos = await walletUtxos(address);
-    const balance = utxos.reduce((sum, utxo) => sum + (utxo.alkanes[asset] ?? 0n), 0n);
+    const balance = await assetBalance(address, asset);
     if (balance >= minimum) return balance;
-    await delay(5000);
+    await delay(POLL_INTERVAL_MS);
   }
   throw new Error(`Asset ${asset} belum terindeks setelah ${Math.floor(timeoutMs / 1000)} detik.`);
 }
 
-async function waitForBtcUtxo(address: string, timeoutMs = 120000): Promise<void> {
+async function waitForAssetIncrease(address: string, asset: string, previous: bigint, timeoutMs = SETTLE_TIMEOUT_MS): Promise<bigint> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const balance = await assetBalance(address, asset);
+    if (balance > previous) return balance;
+    await delay(POLL_INTERVAL_MS);
+  }
+  throw new Error(`Settle ${asset} belum selesai setelah ${Math.floor(timeoutMs / 1000)} detik.`);
+}
+
+async function waitForAssetDecrease(address: string, asset: string, previous: bigint, timeoutMs = SETTLE_TIMEOUT_MS): Promise<bigint> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const balance = await assetBalance(address, asset);
+    if (balance < previous) return balance;
+    await delay(POLL_INTERVAL_MS);
+  }
+  throw new Error(`Perubahan saldo ${asset} belum terindeks setelah ${Math.floor(timeoutMs / 1000)} detik.`);
+}
+
+async function waitForBtcUtxo(address: string, timeoutMs = SETTLE_TIMEOUT_MS): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const utxos = await walletUtxos(address);
     if (utxos.some((utxo) => Object.values(utxo.alkanes).every((value) => value === 0n) && utxo.sats > DUST)) return;
-    await delay(5000);
+    await delay(POLL_INTERVAL_MS);
   }
   throw new Error("BTC faucet belum menghasilkan UTXO fee yang terkonfirmasi.");
 }
 
-async function runStakeUnstake(info: WalletInfo, cfg: Config, signer: DohmSigner, results: StepResult[]): Promise<void> {
+async function runStakeUnstake(info: WalletInfo, cfg: Config, signer: DohmSigner, results: StepResult[]): Promise<boolean> {
   const amount = amountEnv("DOHM_DEFAULT_STAKE_AMOUNT", "1000000");
+  const beforeStake = await assetBalance(info.address, cfg.ids.sDOHM);
   const staked = await runStep(results, `Stake ${amount}`, async () => {
     const prepared = await prepareStake(info, cfg, amount, false);
     await signAndBroadcast(prepared, signer);
   });
-  if (staked) {
-    await runStep(results, "Wait for sDOHM balance", async () => {
-      await waitForAssetBalance(info.address, cfg.ids.sDOHM, amount);
-    });
-  }
-  await runStep(results, `Unstake ${amount}`, async () => {
+  if (!staked) return false;
+  const stakeSettled = await runStep(results, "Wait for stake settle", async () => {
+    await waitForAssetIncrease(info.address, cfg.ids.sDOHM, beforeStake);
+  });
+  if (!stakeSettled) return false;
+  const beforeUnstake = await assetBalance(info.address, cfg.ids.sDOHM);
+  const unstaked = await runStep(results, `Unstake ${amount}`, async () => {
     const prepared = await prepareStake(info, cfg, amount, true);
     await signAndBroadcast(prepared, signer);
+  });
+  if (!unstaked) return false;
+  return runStep(results, "Wait for unstake settle", async () => {
+    await waitForAssetDecrease(info.address, cfg.ids.sDOHM, beforeUnstake);
   });
 }
 
@@ -766,27 +854,148 @@ async function runLiquidityCycle(info: WalletInfo, cfg: Config, signer: DohmSign
   });
 }
 
-async function runFullAuto(info: WalletInfo, cfg: Config, signer: DohmSigner): Promise<void> {
-  const results: StepResult[] = [];
+function configuredAmount(name: string, fallback: string): bigint {
+  return amountEnv(name, fallback);
+}
+
+function ensureBalance(balance: bigint, required: bigint, assetName: string): void {
+  if (balance < required) throw new Error(`Saldo ${assetName} tidak cukup: perlu ${required}, tersedia ${balance}.`);
+}
+
+async function waitForNewBondNote(address: string, previous: Set<string>, timeoutMs = SETTLE_TIMEOUT_MS): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const current = await walletUtxos(address);
+    const newOrbital = current.flatMap((utxo) => Object.keys(utxo.alkanes).filter((asset) => asset.startsWith("2:") && !previous.has(asset)));
+    if (newOrbital.length > 0) return;
+    await delay(POLL_INTERVAL_MS);
+  }
+  throw new Error(`Bond belum settle setelah ${Math.floor(timeoutMs / 1000)} detik.`);
+}
+
+async function runFaucetCycle(info: WalletInfo, cfg: Config, signer: DohmSigner, results: StepResult[]): Promise<boolean> {
   await runStep(results, "BTC faucet", async () => faucet(info.address, "btc"));
-  await runStep(results, "Wait for BTC fee UTXO", async () => waitForBtcUtxo(info.address));
-  await runStep(results, "frBTC faucet and mint", async () => faucet(info.address, "frbtc", info, cfg, signer));
-  await runStep(results, "Wait for frBTC balance", async () => { await waitForAssetBalance(info.address, cfg.ids.frBTC, 1n); });
-  await runStep(results, "Bonding", async () => {
-    const amount = amountEnv("DOHM_DEFAULT_BOND_SATS", "10000");
-    const prepared = await prepareBond(info, cfg, amount, Number(cfg.params.frbtcMarketId), cfg.ids.frBTC);
+  const btcReady = await runStep(results, "Wait for confirmed BTC fee UTXO", async () => waitForBtcUtxo(info.address));
+  if (!btcReady) return false;
+
+  const previousFrbtc = await assetBalance(info.address, cfg.ids.frBTC);
+  const frbtcRequested = await runStep(results, "frBTC faucet and mint", async () => faucet(info.address, "frbtc", info, cfg, signer));
+  const frbtcReady = await runStep(results, "Wait for frBTC faucet settle", async () => {
+    const current = await assetBalance(info.address, cfg.ids.frBTC);
+    if (current > previousFrbtc) return;
+    if (!frbtcRequested && current >= configuredAmount("DOHM_DEFAULT_SWAP_AMOUNT", "1000000")) return;
+    if (!frbtcRequested) throw new Error("frBTC faucet gagal dan saldo frBTC belum mencukupi.");
+    await waitForAssetIncrease(info.address, cfg.ids.frBTC, previousFrbtc);
+  });
+  return frbtcReady;
+}
+
+async function runFullAuto(info: WalletInfo, cfg: Config, signer: DohmSigner, accountIndex: number): Promise<void> {
+  const results: StepResult[] = [];
+  console.log(`\n\x1b[36m>>> Memulai workflow akun #${accountIndex}: ${info.address}\x1b[0m`);
+  if (!await runFaucetCycle(info, cfg, signer, results)) {
+    printSummary(results);
+    return;
+  }
+
+  const frbtcBalance = await assetBalance(info.address, cfg.ids.frBTC);
+  const frbtcSwapAmount = configuredAmount("DOHM_DEFAULT_SWAP_AMOUNT", "1000000");
+  ensureBalance(frbtcBalance, frbtcSwapAmount, "frBTC");
+  const previousDohm = await assetBalance(info.address, cfg.ids.DOHM);
+  const frbtcSwap = await runStep(results, `Swap frBTC -> DOHM (${frbtcSwapAmount})`, async () => {
+    const prepared = await prepareSwap(info, cfg, frbtcSwapAmount, "frBTC", "DOHM");
     await signAndBroadcast(prepared, signer);
   });
-  await runStep(results, "Swap", async () => {
-    const amount = amountEnv("DOHM_DEFAULT_SWAP_AMOUNT", "1000000");
-    const sellDohm = (process.env.DOHM_SWAP_DIRECTION ?? "dohm-to-frbtc") === "dohm-to-frbtc";
-    const prepared = await prepareSwap(info, cfg, amount, sellDohm);
+  if (!frbtcSwap) {
+    printSummary(results);
+    return;
+  }
+  if (!await runStep(results, "Wait for frBTC -> DOHM settle", async () => { await waitForAssetIncrease(info.address, cfg.ids.DOHM, previousDohm); })) {
+    printSummary(results);
+    return;
+  }
+
+  const bondAsset = (process.env.DOHM_BOND_ASSET ?? "DIESEL").toUpperCase();
+  if (bondAsset !== "DIESEL" && bondAsset !== "FIRE") throw new Error("DOHM_BOND_ASSET hanya boleh DIESEL atau FIRE.");
+  const stakeAmount = configuredAmount("DOHM_DEFAULT_STAKE_AMOUNT", "1000000");
+  const reserveSwapAmount = configuredAmount("DOHM_DEFAULT_RESERVE_SWAP_AMOUNT", "1000000");
+  const dohmBalance = await assetBalance(info.address, cfg.ids.DOHM);
+  ensureBalance(dohmBalance, reserveSwapAmount + stakeAmount, "DOHM untuk swap reserve dan stake");
+  const previousReserve = await assetBalance(info.address, cfg.ids[bondAsset]);
+  const reserveSwap = await runStep(results, `Swap DOHM -> ${bondAsset} (${reserveSwapAmount})`, async () => {
+    const prepared = await prepareSwap(info, cfg, reserveSwapAmount, "DOHM", bondAsset);
     await signAndBroadcast(prepared, signer);
   });
-  await runStakeUnstake(info, cfg, signer, results);
+  if (!reserveSwap) {
+    printSummary(results);
+    return;
+  }
+  if (!await runStep(results, `Wait for DOHM -> ${bondAsset} settle`, async () => { await waitForAssetIncrease(info.address, cfg.ids[bondAsset], previousReserve); })) {
+    printSummary(results);
+    return;
+  }
+
+  const market = await resolveBondMarket(cfg, bondAsset);
+  const attestation = await getBondAttestation(market.id);
+  const reserveBalance = await assetBalance(info.address, cfg.ids[bondAsset]);
+  const bondAmount = configuredAmount("DOHM_DEFAULT_BOND_AMOUNT", process.env.DOHM_DEFAULT_BOND_SATS ?? "10000");
+  ensureBalance(reserveBalance, bondAmount, bondAsset);
+  const beforeBond = new Set((await walletUtxos(info.address)).flatMap((utxo) => Object.keys(utxo.alkanes).filter((asset) => asset.startsWith("2:"))));
+  const bonded = await runStep(results, `Bond ${bondAsset} market #${market.id}`, async () => {
+    const prepared = await prepareBond(info, cfg, bondAmount, market.id, cfg.ids[bondAsset], attestation);
+    await signAndBroadcast(prepared, signer);
+  });
+  if (!bonded) {
+    printSummary(results);
+    return;
+  }
+  if (!await runStep(results, "Wait for bond settle", async () => { await waitForNewBondNote(info.address, beforeBond); })) {
+    printSummary(results);
+    return;
+  }
+
+  if (!await runStakeUnstake(info, cfg, signer, results)) {
+    printSummary(results);
+    return;
+  }
   await runLiquidityCycle(info, cfg, signer, results);
-  await runStep(results, "Claim matured bonds", async () => claimMatured());
+  await runStep(results, "Claim matured bonds", async () => claimMaturedForWallet(info, cfg, signer));
   printSummary(results);
+}
+
+async function runAllWalletFaucets(): Promise<void> {
+  const wallets = await readWalletCollection();
+  const cfg = await getConfig();
+  for (let index = 1; index <= wallets.length; index += 1) {
+    const results: StepResult[] = [];
+    try {
+      const { signer, info } = await loadWalletAt(index);
+      console.log(`\n\x1b[36m>>> Faucet akun #${index}/${wallets.length}: ${info.address}\x1b[0m`);
+      await runFaucetCycle(info, cfg, signer, results);
+    } catch (error) {
+      results.push({ label: "Wallet faucet", success: false });
+      console.log(`\x1b[31m[✗] Akun #${index} gagal: ${error instanceof Error ? error.message : String(error)}\x1b[0m`);
+    }
+    printSummary(results);
+    if (index < wallets.length) await delay(Number(process.env.DOHM_ACCOUNT_DELAY_MS ?? "2000"));
+  }
+}
+
+async function runFullAutoAllWallets(): Promise<void> {
+  const wallets = await readWalletCollection();
+  const cfg = await getConfig();
+  for (let index = 1; index <= wallets.length; index += 1) {
+    try {
+      const { signer, info } = await loadWalletAt(index);
+      await runFullAuto(info, cfg, signer, index);
+    } catch (error) {
+      console.log(`\x1b[31m[✗] Akun #${index} dihentikan: ${error instanceof Error ? error.message : String(error)}\x1b[0m`);
+    }
+    if (index < wallets.length) {
+      console.log(`\x1b[33m[~] Menunggu sebelum akun #${index + 1}...\x1b[0m`);
+      await delay(Number(process.env.DOHM_ACCOUNT_DELAY_MS ?? "2000"));
+    }
+  }
 }
 
 async function interactiveMenu(): Promise<void> {
@@ -804,9 +1013,11 @@ async function interactiveMenu(): Promise<void> {
         continue;
       }
       if (choice === "9") {
-        const { signer, info } = await loadWallet();
-        const cfg = await getConfig();
-        await runFullAuto(info, cfg, signer);
+        try { await runFullAutoAllWallets(); } catch (error) { console.log(`\x1b[31m[✗] Full Auto gagal: ${error instanceof Error ? error.message : String(error)}\x1b[0m`); }
+        continue;
+      }
+      if (choice === "2") {
+        try { await runAllWalletFaucets(); } catch (error) { console.log(`\x1b[31m[✗] Faucet semua wallet gagal: ${error instanceof Error ? error.message : String(error)}\x1b[0m`); }
         continue;
       }
       if (choice.toLowerCase() === "a") {
@@ -821,17 +1032,14 @@ async function interactiveMenu(): Promise<void> {
       const cfg = await getConfig();
       const results: StepResult[] = [];
       switch (choice) {
-        case "2":
-          await runStep(results, "BTC faucet", async () => faucet(info.address, "btc"));
-          const btcReady = await runStep(results, "Wait for BTC fee UTXO", async () => waitForBtcUtxo(info.address));
-          if (btcReady) {
-            await runStep(results, "frBTC faucet and mint", async () => faucet(info.address, "frbtc", info, cfg, signer));
-          }
-          break;
         case "3":
           await runStep(results, "Bonding", async () => {
-            const amount = amountEnv("DOHM_DEFAULT_BOND_SATS", "10000");
-            const prepared = await prepareBond(info, cfg, amount, Number(cfg.params.frbtcMarketId), cfg.ids.frBTC);
+            const bondAsset = (process.env.DOHM_BOND_ASSET ?? "DIESEL").toUpperCase();
+            if (bondAsset !== "DIESEL" && bondAsset !== "FIRE") throw new Error("DOHM_BOND_ASSET hanya boleh DIESEL atau FIRE.");
+            const market = await resolveBondMarket(cfg, bondAsset);
+            const attestation = await getBondAttestation(market.id);
+            const amount = configuredAmount("DOHM_DEFAULT_BOND_AMOUNT", process.env.DOHM_DEFAULT_BOND_SATS ?? "10000");
+            const prepared = await prepareBond(info, cfg, amount, market.id, cfg.ids[bondAsset], attestation);
             await signAndBroadcast(prepared, signer);
           });
           break;
@@ -839,8 +1047,12 @@ async function interactiveMenu(): Promise<void> {
         case "5":
           await runStep(results, "Swap", async () => {
             const amount = amountEnv("DOHM_DEFAULT_SWAP_AMOUNT", "1000000");
-            const sellDohm = (process.env.DOHM_SWAP_DIRECTION ?? "dohm-to-frbtc") === "dohm-to-frbtc";
-            const prepared = await prepareSwap(info, cfg, amount, sellDohm);
+            const direction = process.env.DOHM_SWAP_DIRECTION ?? "frbtc-to-dohm";
+            const [rawTokenIn, rawTokenOut] = direction.split("-to-");
+            const tokenIn = rawTokenIn ? normalizeAssetName(rawTokenIn) : "";
+            const tokenOut = rawTokenOut ? normalizeAssetName(rawTokenOut) : "";
+            if (!tokenIn || !tokenOut || !cfg.ids[tokenIn] || !cfg.ids[tokenOut]) throw new Error("DOHM_SWAP_DIRECTION contoh: frbtc-to-dohm atau dohm-to-frbtc.");
+            const prepared = await prepareSwap(info, cfg, amount, tokenIn, tokenOut);
             await signAndBroadcast(prepared, signer);
           });
           break;
@@ -864,6 +1076,7 @@ async function main(): Promise<void> {
   if (command === "wallet" && subcommand === "list") return listWallets();
   if (command === "wallet" && subcommand === "migrate") return migrateWalletStore();
   if (command === "wallet" && subcommand === "backup") return backupWallet();
+  if (command === "full-auto") return runFullAutoAllWallets();
   if (command === "faucet") {
     if (subcommand !== "btc" && subcommand !== "frbtc") {
       throw new Error("Usage: npm start -- faucet btc | npm start -- faucet frbtc");
@@ -878,8 +1091,23 @@ async function main(): Promise<void> {
   const amount = BigInt(arg("amount", "0")!);
   let prepared: PreparedTx;
   switch (command) {
-    case "bond": prepared = await prepareBond(info, cfg, amount || BigInt(process.env.DOHM_DEFAULT_BOND_SATS ?? "10000"), Number(arg("market", String(cfg.params.frbtcMarketId ?? 1))), arg("reserve", cfg.ids.frBTC)!); break;
-    case "swap": prepared = await prepareSwap(info, cfg, amount || BigInt(process.env.DOHM_DEFAULT_SWAP_AMOUNT ?? "1000000"), arg("direction", "dohm-to-frbtc") === "dohm-to-frbtc", BigInt(arg("min-out", "0")!)); break;
+    case "bond": {
+      const bondAsset = (process.env.DOHM_BOND_ASSET ?? "DIESEL").toUpperCase();
+      if (bondAsset !== "DIESEL" && bondAsset !== "FIRE") throw new Error("DOHM_BOND_ASSET hanya boleh DIESEL atau FIRE.");
+      const market = await resolveBondMarket(cfg, bondAsset);
+      const attestation = await getBondAttestation(market.id);
+      prepared = await prepareBond(info, cfg, amount || BigInt(process.env.DOHM_DEFAULT_BOND_AMOUNT ?? process.env.DOHM_DEFAULT_BOND_SATS ?? "10000"), market.id, cfg.ids[bondAsset], attestation);
+      break;
+    }
+    case "swap": {
+      const direction = arg("direction", "frbtc-to-dohm")!;
+      const [rawTokenIn, rawTokenOut] = direction.split("-to-");
+      const tokenIn = rawTokenIn ? normalizeAssetName(rawTokenIn) : "";
+      const tokenOut = rawTokenOut ? normalizeAssetName(rawTokenOut) : "";
+      if (!tokenIn || !tokenOut || !cfg.ids[tokenIn] || !cfg.ids[tokenOut]) throw new Error("direction contoh: frbtc-to-dohm atau dohm-to-fire.");
+      prepared = await prepareSwap(info, cfg, amount || BigInt(process.env.DOHM_DEFAULT_SWAP_AMOUNT ?? "1000000"), tokenIn, tokenOut, BigInt(arg("min-out", "0")!));
+      break;
+    }
     case "stake": prepared = await prepareStake(info, cfg, amount, false); break;
     case "unstake": prepared = await prepareStake(info, cfg, amount, true); break;
     case "add-liquidity": prepared = await prepareAddLiquidity(info, cfg, BigInt(arg("dohm", "0")!), BigInt(arg("frbtc", "0")!), BigInt(arg("min-dohm", "0")!), BigInt(arg("min-frbtc", "0")!)); break;
