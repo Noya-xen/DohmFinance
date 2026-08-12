@@ -399,12 +399,31 @@ function reverseTxid(txid: string): string {
 }
 
 async function walletUtxos(address: string): Promise<Utxo[]> {
-  const response = await fetch(`${ESPLORA_URL.replace(/\/$/, "")}/address/${address}/utxo`);
-  if (!response.ok) throw new Error(`UTXO HTTP ${response.status}`);
+  let response: Response | undefined;
+  let lastStatus = "unknown";
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    response = await fetch(`${ESPLORA_URL.replace(/\/$/, "")}/address/${address}/utxo`);
+    if (response.ok) break;
+    lastStatus = String(response.status);
+    if (![502, 503, 504].includes(response.status) || attempt === 3) {
+      throw new Error(`UTXO HTTP ${response.status}`);
+    }
+    await delay(attempt * 1000);
+  }
+  if (!response?.ok) throw new Error(`UTXO HTTP ${lastStatus}`);
   const raw = (await response.json()) as Array<{ txid: string; vout: number; value: number; status: { confirmed: boolean; block_hash?: string } }>;
   const confirmed = raw.filter((u) => u.status?.confirmed);
-  const calls = confirmed.map((u) => ["alkanes_protorunesbyoutpoint", [{ txid: reverseTxid(u.txid), vout: u.vout, protocolTag: "1" }]]);
-  const assets = calls.length ? await rpc<unknown[]>("sandshrew_multicall", [calls]) : [];
+  // Public Dohm RPC tidak mengizinkan sandshrew_multicall. Gunakan endpoint
+  // per-outpoint yang didukung publik agar status, fee selection, dan settle
+  // polling tetap bisa berjalan.
+  const assets: unknown[] = [];
+  for (const u of confirmed) {
+    assets.push(await rpc<unknown>("alkanes_protorunesbyoutpoint", [{
+      txid: reverseTxid(u.txid),
+      vout: u.vout,
+      protocolTag: "1",
+    }]));
+  }
   return confirmed.map((u, index) => {
     const entries = Array.isArray(assets[index]) ? assets[index] as Array<{ token?: { id?: Id }; rune?: { id?: Id }; runeId?: Id; value?: string | number; balance?: string | number }> : [];
     const alkanes: AlkaneMap = {};
@@ -891,8 +910,17 @@ async function waitForNewBondNote(address: string, previous: Set<string>, timeou
 }
 
 async function runFaucetCycle(info: WalletInfo, cfg: Config, signer: DohmSigner, results: StepResult[]): Promise<boolean> {
-  await runStep(results, "BTC faucet", async () => faucet(info.address, "btc"));
-  const btcReady = await runStep(results, "Wait for confirmed BTC fee UTXO", async () => waitForBtcUtxo(info.address));
+  const btcRequested = await runStep(results, "BTC faucet", async () => faucet(info.address, "btc"));
+  const btcReady = await runStep(results, "Wait for confirmed BTC fee UTXO", async () => {
+    if (!btcRequested) {
+      const existing = await walletUtxos(info.address);
+      const hasFeeUtxo = existing.some((utxo) => Object.values(utxo.alkanes).every((value) => value === 0n) && utxo.sats > DUST);
+      if (!hasFeeUtxo) throw new Error("BTC faucet tidak berhasil dan wallet belum memiliki UTXO fee yang dapat dipakai.");
+      console.log("[i] BTC faucet cooldown/error; memakai UTXO fee yang sudah ada.");
+      return;
+    }
+    await waitForBtcUtxo(info.address);
+  });
   if (!btcReady) return false;
 
   const previousFrbtc = await assetBalance(info.address, cfg.ids.frBTC);

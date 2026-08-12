@@ -75,6 +75,8 @@ npm start -- faucet frbtc
 
 Faucet BTC dan frBTC tidak dijalankan bersamaan: script menunggu UTXO BTC terkonfirmasi dan menunggu saldo frBTC terindeks sebelum melanjutkan.
 
+Jika faucet BTC sedang cooldown tetapi wallet sudah memiliki UTXO fee terkonfirmasi, workflow akan memakai UTXO tersebut dan tidak mengulang klaim. Jika belum ada UTXO fee, akun dilewati sampai cooldown selesai. Pembacaan aset memakai pemanggilan `alkanes_protorunesbyoutpoint` per UTXO karena endpoint RPC publik Dohm tidak mengizinkan `sandshrew_multicall`; respons Esplora 502/503/504 juga dicoba ulang otomatis.
+
 Konfigurasi workflow utama ada di `.env`: `DOHM_BOND_ASSET=DIESEL` atau `FIRE`, persentase swap/stake, `DOHM_DEFAULT_BOND_AMOUNT`, `DOHM_SETTLE_TIMEOUT_MS`, dan `DOHM_ACCOUNT_DELAY_MS`. Timeout settle default 15 menit karena status swap di website dapat berada pada tahap `SETTLING` beberapa menit.
 
 Semua nominal swap dan stake pada menu serta Full Auto dihitung dari saldo aset yang terbaca tepat sebelum transaksi:
