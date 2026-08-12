@@ -75,7 +75,23 @@ npm start -- faucet frbtc
 
 Faucet BTC dan frBTC tidak dijalankan bersamaan: script menunggu UTXO BTC terkonfirmasi dan menunggu saldo frBTC terindeks sebelum melanjutkan.
 
-Konfigurasi workflow utama ada di `.env`: `DOHM_BOND_ASSET=DIESEL` atau `FIRE`, `DOHM_DEFAULT_RESERVE_SWAP_AMOUNT`, `DOHM_DEFAULT_BOND_AMOUNT`, `DOHM_DEFAULT_STAKE_AMOUNT`, `DOHM_SETTLE_TIMEOUT_MS`, dan `DOHM_ACCOUNT_DELAY_MS`. Timeout settle default 15 menit karena status swap di website dapat berada pada tahap `SETTLING` beberapa menit.
+Konfigurasi workflow utama ada di `.env`: `DOHM_BOND_ASSET=DIESEL` atau `FIRE`, persentase swap/stake, `DOHM_DEFAULT_BOND_AMOUNT`, `DOHM_SETTLE_TIMEOUT_MS`, dan `DOHM_ACCOUNT_DELAY_MS`. Timeout settle default 15 menit karena status swap di website dapat berada pada tahap `SETTLING` beberapa menit.
+
+Semua nominal swap dan stake pada menu serta Full Auto dihitung dari saldo aset yang terbaca tepat sebelum transaksi:
+
+```env
+# Swap manual/menu [5], atau CLI swap tanpa --amount
+DOHM_SWAP_PERCENT=25
+
+# Full Auto: frBTC -> DOHM, lalu DOHM -> DIESEL/FIRE
+DOHM_FRBTC_SWAP_PERCENT=50
+DOHM_DOHM_SWAP_PERCENT=50
+
+# Menu [6] dan Full Auto stake/unstake
+DOHM_STAKE_PERCENT=25
+```
+
+Persentase boleh memakai angka desimal sampai dua digit, harus lebih dari 0 dan maksimal 100. Untuk perintah CLI, `--percent=10` dapat dipakai sebagai override sekali jalan; `--amount=...` tetap tersedia sebagai override nominal eksplisit jika diperlukan.
 
 Jika memiliki `wallet.json` lama dengan format satu wallet terenkripsi, script tetap bisa membacanya. Jalankan `npm start -- wallet migrate` untuk mengubahnya menjadi format plaintext; password lama hanya diperlukan satu kali saat migrasi.
 
@@ -104,12 +120,14 @@ Perintah CLI langsung juga tersedia dan langsung menandatangani serta broadcast 
 
 ```powershell
 npm start -- bond --amount=10000
-npm start -- swap --direction=frbtc-to-dohm --amount=1000000
-npm start -- swap --direction=dohm-to-fire --amount=1000000
+npm start -- swap --direction=frbtc-to-dohm
+npm start -- swap --direction=dohm-to-fire --percent=25
+npm start -- stake --percent=25
+npm start -- unstake --percent=25
 npm start -- claim-matured
 ```
 
-Jumlah default workflow diatur melalui `.env`. Bond single-asset mengikuti market aktif Dohm dan memakai attestation endpoint `/api/bond/attest`; market yang dipilih hanya DIESEL atau FIRE. Swap menunggu saldo output terindeks sebagai tanda settle sebelum langkah berikutnya.
+Persentase swap/stake dan jumlah bond/liquidity diatur melalui `.env`. Bond single-asset mengikuti market aktif Dohm dan memakai attestation endpoint `/api/bond/attest`; market yang dipilih hanya DIESEL atau FIRE. Swap menunggu saldo output terindeks sebagai tanda settle sebelum langkah berikutnya.
 
 `wallet.json` berisi recovery phrase plaintext untuk kemudahan testnet dan sengaja masuk `.gitignore`. Jangan upload, commit, atau bagikan file ini. Jangan gunakan format plaintext ini untuk wallet mainnet.
 

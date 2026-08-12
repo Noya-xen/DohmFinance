@@ -719,6 +719,19 @@ function amountEnv(name: string, fallback: string): bigint {
   return value;
 }
 
+function percentageAmount(balance: bigint, envName: string, fallback: string, override?: string): bigint {
+  if (balance <= 0n) throw new Error(`Saldo kosong untuk menghitung ${envName}.`);
+  const raw = override ?? process.env[envName] ?? fallback;
+  const percentage = Number(raw);
+  if (!Number.isFinite(percentage) || percentage <= 0 || percentage > 100) {
+    throw new Error(`${envName} harus berupa persentase lebih dari 0 sampai 100.`);
+  }
+  const basisPoints = BigInt(Math.round(percentage * 100));
+  const amount = balance * basisPoints / 10000n;
+  if (amount <= 0n) throw new Error(`${envName} menghasilkan nominal 0 dari saldo ${balance}.`);
+  return amount;
+}
+
 function printMenu(): void {
   console.log("\x1b[36m────────────────────────────────────────────");
   console.log("                 MAIN MENU");
@@ -809,7 +822,9 @@ async function waitForBtcUtxo(address: string, timeoutMs = SETTLE_TIMEOUT_MS): P
 }
 
 async function runStakeUnstake(info: WalletInfo, cfg: Config, signer: DohmSigner, results: StepResult[]): Promise<boolean> {
-  const amount = amountEnv("DOHM_DEFAULT_STAKE_AMOUNT", "1000000");
+  const dohmBalance = await assetBalance(info.address, cfg.ids.DOHM);
+  const amount = percentageAmount(dohmBalance, "DOHM_STAKE_PERCENT", "25");
+  console.log(`[i] Stake ${process.env.DOHM_STAKE_PERCENT ?? "25"}% dari saldo DOHM ${dohmBalance} = ${amount}`);
   const beforeStake = await assetBalance(info.address, cfg.ids.sDOHM);
   const staked = await runStep(results, `Stake ${amount}`, async () => {
     const prepared = await prepareStake(info, cfg, amount, false);
@@ -821,8 +836,10 @@ async function runStakeUnstake(info: WalletInfo, cfg: Config, signer: DohmSigner
   });
   if (!stakeSettled) return false;
   const beforeUnstake = await assetBalance(info.address, cfg.ids.sDOHM);
-  const unstaked = await runStep(results, `Unstake ${amount}`, async () => {
-    const prepared = await prepareStake(info, cfg, amount, true);
+  const unstakeAmount = percentageAmount(beforeUnstake, "DOHM_STAKE_PERCENT", "25");
+  console.log(`[i] Unstake ${process.env.DOHM_STAKE_PERCENT ?? "25"}% dari saldo sDOHM ${beforeUnstake} = ${unstakeAmount}`);
+  const unstaked = await runStep(results, `Unstake ${unstakeAmount}`, async () => {
+    const prepared = await prepareStake(info, cfg, unstakeAmount, true);
     await signAndBroadcast(prepared, signer);
   });
   if (!unstaked) return false;
@@ -883,7 +900,7 @@ async function runFaucetCycle(info: WalletInfo, cfg: Config, signer: DohmSigner,
   const frbtcReady = await runStep(results, "Wait for frBTC faucet settle", async () => {
     const current = await assetBalance(info.address, cfg.ids.frBTC);
     if (current > previousFrbtc) return;
-    if (!frbtcRequested && current >= configuredAmount("DOHM_DEFAULT_SWAP_AMOUNT", "1000000")) return;
+    if (!frbtcRequested && current > 0n) return;
     if (!frbtcRequested) throw new Error("frBTC faucet gagal dan saldo frBTC belum mencukupi.");
     await waitForAssetIncrease(info.address, cfg.ids.frBTC, previousFrbtc);
   });
@@ -899,8 +916,8 @@ async function runFullAuto(info: WalletInfo, cfg: Config, signer: DohmSigner, ac
   }
 
   const frbtcBalance = await assetBalance(info.address, cfg.ids.frBTC);
-  const frbtcSwapAmount = configuredAmount("DOHM_DEFAULT_SWAP_AMOUNT", "1000000");
-  ensureBalance(frbtcBalance, frbtcSwapAmount, "frBTC");
+  const frbtcSwapAmount = percentageAmount(frbtcBalance, "DOHM_FRBTC_SWAP_PERCENT", "50");
+  console.log(`[i] Swap frBTC ${process.env.DOHM_FRBTC_SWAP_PERCENT ?? "50"}% dari saldo ${frbtcBalance} = ${frbtcSwapAmount}`);
   const previousDohm = await assetBalance(info.address, cfg.ids.DOHM);
   const frbtcSwap = await runStep(results, `Swap frBTC -> DOHM (${frbtcSwapAmount})`, async () => {
     const prepared = await prepareSwap(info, cfg, frbtcSwapAmount, "frBTC", "DOHM");
@@ -917,10 +934,9 @@ async function runFullAuto(info: WalletInfo, cfg: Config, signer: DohmSigner, ac
 
   const bondAsset = (process.env.DOHM_BOND_ASSET ?? "DIESEL").toUpperCase();
   if (bondAsset !== "DIESEL" && bondAsset !== "FIRE") throw new Error("DOHM_BOND_ASSET hanya boleh DIESEL atau FIRE.");
-  const stakeAmount = configuredAmount("DOHM_DEFAULT_STAKE_AMOUNT", "1000000");
-  const reserveSwapAmount = configuredAmount("DOHM_DEFAULT_RESERVE_SWAP_AMOUNT", "1000000");
   const dohmBalance = await assetBalance(info.address, cfg.ids.DOHM);
-  ensureBalance(dohmBalance, reserveSwapAmount + stakeAmount, "DOHM untuk swap reserve dan stake");
+  const reserveSwapAmount = percentageAmount(dohmBalance, "DOHM_DOHM_SWAP_PERCENT", "50");
+  console.log(`[i] Swap DOHM ${process.env.DOHM_DOHM_SWAP_PERCENT ?? "50"}% dari saldo ${dohmBalance} = ${reserveSwapAmount}`);
   const previousReserve = await assetBalance(info.address, cfg.ids[bondAsset]);
   const reserveSwap = await runStep(results, `Swap DOHM -> ${bondAsset} (${reserveSwapAmount})`, async () => {
     const prepared = await prepareSwap(info, cfg, reserveSwapAmount, "DOHM", bondAsset);
@@ -1046,12 +1062,14 @@ async function interactiveMenu(): Promise<void> {
         case "4": await runStep(results, "Claim matured bonds", async () => claimMatured()); break;
         case "5":
           await runStep(results, "Swap", async () => {
-            const amount = amountEnv("DOHM_DEFAULT_SWAP_AMOUNT", "1000000");
             const direction = process.env.DOHM_SWAP_DIRECTION ?? "frbtc-to-dohm";
             const [rawTokenIn, rawTokenOut] = direction.split("-to-");
             const tokenIn = rawTokenIn ? normalizeAssetName(rawTokenIn) : "";
             const tokenOut = rawTokenOut ? normalizeAssetName(rawTokenOut) : "";
             if (!tokenIn || !tokenOut || !cfg.ids[tokenIn] || !cfg.ids[tokenOut]) throw new Error("DOHM_SWAP_DIRECTION contoh: frbtc-to-dohm atau dohm-to-frbtc.");
+            const balance = await assetBalance(info.address, cfg.ids[tokenIn]);
+            const amount = percentageAmount(balance, "DOHM_SWAP_PERCENT", "25");
+            console.log(`[i] Swap ${tokenIn} ${process.env.DOHM_SWAP_PERCENT ?? "25"}% dari saldo ${balance} = ${amount}`);
             const prepared = await prepareSwap(info, cfg, amount, tokenIn, tokenOut);
             await signAndBroadcast(prepared, signer);
           });
@@ -1089,6 +1107,7 @@ async function main(): Promise<void> {
   const { signer, info } = await loadWallet();
   const cfg = await getConfig();
   const amount = BigInt(arg("amount", "0")!);
+  const amountArg = arg("amount");
   let prepared: PreparedTx;
   switch (command) {
     case "bond": {
@@ -1105,11 +1124,32 @@ async function main(): Promise<void> {
       const tokenIn = rawTokenIn ? normalizeAssetName(rawTokenIn) : "";
       const tokenOut = rawTokenOut ? normalizeAssetName(rawTokenOut) : "";
       if (!tokenIn || !tokenOut || !cfg.ids[tokenIn] || !cfg.ids[tokenOut]) throw new Error("direction contoh: frbtc-to-dohm atau dohm-to-fire.");
-      prepared = await prepareSwap(info, cfg, amount || BigInt(process.env.DOHM_DEFAULT_SWAP_AMOUNT ?? "1000000"), tokenIn, tokenOut, BigInt(arg("min-out", "0")!));
+      const balance = await assetBalance(info.address, cfg.ids[tokenIn]);
+      const swapAmount = amountArg === undefined
+        ? percentageAmount(balance, "DOHM_SWAP_PERCENT", "25", arg("percent"))
+        : amount;
+      console.log(`[i] Swap ${tokenIn} ${amountArg === undefined ? `${arg("percent", process.env.DOHM_SWAP_PERCENT ?? "25")}%` : "nominal manual"} dari saldo ${balance} = ${swapAmount}`);
+      prepared = await prepareSwap(info, cfg, swapAmount, tokenIn, tokenOut, BigInt(arg("min-out", "0")!));
       break;
     }
-    case "stake": prepared = await prepareStake(info, cfg, amount, false); break;
-    case "unstake": prepared = await prepareStake(info, cfg, amount, true); break;
+    case "stake": {
+      const balance = await assetBalance(info.address, cfg.ids.DOHM);
+      const stakeAmount = amountArg === undefined
+        ? percentageAmount(balance, "DOHM_STAKE_PERCENT", "25", arg("percent"))
+        : amount;
+      console.log(`[i] Stake ${amountArg === undefined ? `${arg("percent", process.env.DOHM_STAKE_PERCENT ?? "25")}%` : "nominal manual"} dari saldo DOHM ${balance} = ${stakeAmount}`);
+      prepared = await prepareStake(info, cfg, stakeAmount, false);
+      break;
+    }
+    case "unstake": {
+      const balance = await assetBalance(info.address, cfg.ids.sDOHM);
+      const unstakeAmount = amountArg === undefined
+        ? percentageAmount(balance, "DOHM_STAKE_PERCENT", "25", arg("percent"))
+        : amount;
+      console.log(`[i] Unstake ${amountArg === undefined ? `${arg("percent", process.env.DOHM_STAKE_PERCENT ?? "25")}%` : "nominal manual"} dari saldo sDOHM ${balance} = ${unstakeAmount}`);
+      prepared = await prepareStake(info, cfg, unstakeAmount, true);
+      break;
+    }
     case "add-liquidity": prepared = await prepareAddLiquidity(info, cfg, BigInt(arg("dohm", "0")!), BigInt(arg("frbtc", "0")!), BigInt(arg("min-dohm", "0")!), BigInt(arg("min-frbtc", "0")!)); break;
     case "remove-liquidity": prepared = await prepareRemoveLiquidity(info, cfg, amount, BigInt(arg("min-dohm", "0")!), BigInt(arg("min-frbtc", "0")!)); break;
     case "claim-matured": return claimMatured();
